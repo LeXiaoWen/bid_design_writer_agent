@@ -1,0 +1,121 @@
+{
+  "name": "bid-design-writer-desktop",
+  "version": "0.1.0",
+  "description": "建筑设计标书方案助手桌面应用",
+  "author": "AI Workbench",
+  "private": true,
+  "main": ".desktop-dist/main.js",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:ui\" \"npm run dev:agent\" \"npm run dev:electron\" --names ui,agent,electron --prefix-colors blue,green,magenta --kill-others",
+    "dev:debug": "LOG_LEVEL=debug npm run dev",
+    "dev:ui": "npm --prefix frontend run dev",
+    "dev:agent": "./scripts/run-agent.sh || scripts\\run-agent.bat",
+    "dev:electron": "wait-on http://localhost:3000 && npm run build:desktop && node scripts/run-electron.mjs",
+    "build": "npm --prefix frontend run build && npm run build:desktop",
+    "build:agent": "node scripts/build-agent.mjs",
+    "build:desktop": "tsc -p desktop/tsconfig.json",
+    "pack": "node scripts/package-desktop.mjs --dir",
+    "pack:mac": "node scripts/package-desktop.mjs --target mac --dir",
+    "pack:win": "node scripts/package-desktop.mjs --target win --dir",
+    "dist": "node scripts/package-desktop.mjs",
+    "dist:mac": "node scripts/package-desktop.mjs --target mac --targets zip,dmg",
+    "dist:mac:zip": "node scripts/package-desktop.mjs --target mac --targets zip",
+    "dist:mac:dmg": "node scripts/package-desktop.mjs --target mac --targets dmg",
+    "dist:win": "node scripts/package-desktop.mjs --target win --targets nsis,zip",
+    "dist:win:nsis": "node scripts/package-desktop.mjs --target win --targets nsis",
+    "dist:win:zip": "node scripts/package-desktop.mjs --target win --targets zip",
+    "dist:linux": "node scripts/package-desktop.mjs --target linux --targets AppImage,tar.gz",
+    "install:agent": "./scripts/setup-agent.sh || scripts\\setup-agent.bat",
+    "typecheck": "npm --prefix frontend run typecheck && npm run build:desktop",
+    "test:backend": "PYTHONPATH=. pytest -p no:capture backend/tests",
+    "test:frontend": "npm --prefix frontend run test:unit"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "concurrently": "^9.1.2",
+    "electron": "^39.2.7",
+    "electron-builder": "^26.15.3",
+    "typescript": "^5",
+    "wait-on": "^9.0.3"
+  },
+  "build": {
+    "appId": "com.aiworkbench.bidDesignWriter",
+    "productName": "建筑设计标书方案助手",
+    "directories": {
+      "buildResources": "packaging",
+      "output": "release"
+    },
+    "files": [
+      ".desktop-dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "frontend/out",
+        "to": "frontend"
+      },
+      {
+        "from": ".agent-dist",
+        "to": "agent",
+        "filter": [
+          "ai-workbench-agent*"
+        ]
+      }
+    ],
+    "asar": true,
+    "compression": "maximum",
+    "mac": {
+      "category": "public.app-category.productivity",
+      "identity": null,
+      "icon": "packaging/icons/icon.icns",
+      "target": [
+        "zip",
+        "dmg"
+      ],
+      "artifactName": "${productName}-${version}-mac-${arch}.${ext}"
+    },
+    "dmg": {
+      "artifactName": "${productName}-${version}-mac-${arch}.${ext}",
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "win": {
+      "icon": "packaging/icons/icon.ico",
+      "artifactName": "${productName}-${version}-win-${arch}.${ext}",
+      "requestedExecutionLevel": "asInvoker",
+      "target": [
+        "nsis",
+        "zip"
+      ]
+    },
+    "nsis": {
+      "artifactName": "${productName}-${version}-win-${arch}-setup.${ext}",
+      "unicode": true,
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "${productName}",
+      "deleteAppDataOnUninstall": false
+    },
+    "linux": {
+      "artifactName": "${productName}-${version}-linux-${arch}.${ext}",
+      "target": [
+        "AppImage",
+        "tar.gz"
+      ],
+      "category": "Office"
+    }
+  }
+}

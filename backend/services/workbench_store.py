@@ -1,0 +1,1021 @@
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable, Optional
+from uuid import uuid4
+
+try:
+    import keyring
+    from keyring.errors import KeyringError, PasswordDeleteError
+except Exception:  # pragma: no cover - exercised only when optional backend is unavailable.
+    keyring = None  # type: ignore[assignment]
+    KeyringError = Exception  # type: ignore[assignment]
+    PasswordDeleteError = Exception  # type: ignore[assignment]
+
+from ..schemas import (
+    ArtifactInfo,
+    AuthUser,
+    BehaviorReportEmail,
+    BidWorkflow,
+    BidWorkflowStatus,
+    ProviderProfile,
+    ProviderProfileCreate,
+    ProviderProfileUpdate,
+    SearchResult,
+    WorkbenchConversation,
+    WorkbenchConversationCreate,
+    WorkbenchConversationUpdate,
+    WorkbenchMessage,
+    WorkbenchProject,
+    WorkbenchProjectCreate,
+    WorkbenchProjectUpdate,
+)
+
+
+DEFAULT_PROJECT_TITLE = "默认项目"
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def data_dir() -> Path:
+    raw = os.getenv("AI_WORKBENCH_DATA_DIR")
+    if raw:
+        path = Path(raw).expanduser()
+    else:
+        path = Path.cwd() / ".data"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def db_path() -> Path:
+    raw = os.getenv("AI_WORKBENCH_DB_PATH")
+    if raw:
+        path = Path(raw).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+    return data_dir() / "app.db"
+
+
+class CredentialStore:
+    """Store provider API keys in the system keyring, with explicit dev/test fallback."""
+
+    def __init__(self) -> None:
+        self._keys: dict[str, str] = {}
+        self._service = os.getenv("AI_WORKBENCH_KEYRING_SERVICE", "bid-design-writer-agent")
+
+    def _allow_memory_fallback(self) -> bool:
+        raw = os.getenv("AI_WORKBENCH_ALLOW_MEMORY_CREDENTIALS", "")
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+    def _keyring_unavailable_error(self) -> RuntimeError:
+        return RuntimeError("系统钥匙串不可用。请检查操作系统凭据服务，或在开发/测试环境启用 AI_WORKBENCH_ALLOW_MEMORY_CREDENTIALS=true。")
+
+    def _fallback_or_raise(self) -> None:
+        if self._allow_memory_fallback():
+            return
+        raise self._keyring_unavailable_error()
+
+    def set(self, credential_key: str, api_key: str | None) -> None:
+        if not api_key:
+            return
+        if keyring is None:
+            self._fallback_or_raise()
+            self._keys[credential_key] = api_key
+            return
+        try:
+            keyring.set_password(self._service, credential_key, api_key)
+            self._keys.pop(credential_key, None)
+        except Exception as exc:
+            if not self._allow_memory_fallback():
+                raise self._keyring_unavailable_error() from exc
+            self._keys[credential_key] = api_key
+
+    def get(self, credential_key: str) -> str | None:
+        if credential_key in self._keys:
+            return self._keys[credential_key]
+        if keyring is None:
+            self._fallback_or_raise()
+            return self._keys.get(credential_key)
+        try:
+            return keyring.get_password(self._service, credential_key)
+        except Exception as exc:
+            if not self._allow_memory_fallback():
+                raise self._keyring_unavailable_error() from exc
+            return self._keys.get(credential_key)
+
+    def delete(self, credential_key: str) -> None:
+        self._keys.pop(credential_key, None)
+        if keyring is None:
+            if self._allow_memory_fallback():
+                return
+            raise self._keyring_unavailable_error()
+        try:
+            keyring.delete_password(self._service, credential_key)
+        except PasswordDeleteError:
+            return
+        except Exception as exc:
+            if not self._allow_memory_fallback():
+                raise self._keyring_unavailable_error() from exc
+
+    def has(self, credential_key: str) -> bool:
+        return self.get(credential_key) is not None
+
+
+credentials = CredentialStore()
+
+
+class WorkbenchStore:
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path or db_path()
+        self._connection = sqlite3.connect(self.path, check_same_thread=False)
+        self._connection.row_factory = sqlite3.Row
+        self._connection.execute("PRAGMA foreign_keys = ON")
+        self._connection.execute("PRAGMA journal_mode = WAL")
+        self._init_schema()
+
+    def _init_schema(self) -> None:
+        with self._connection:
+            self._connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS projects (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    workspace_path TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    provider_profile_id TEXT,
+                    model TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS messages (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    model TEXT,
+                    finish_reason TEXT,
+                    usage_json TEXT,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS provider_profiles (
+                    id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    base_url TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    credential_key TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS bid_workflows (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                    provider_profile_id TEXT REFERENCES provider_profiles(id) ON DELETE SET NULL,
+                    file_name TEXT NOT NULL,
+                    file_text TEXT NOT NULL,
+                    extracted_markdown TEXT NOT NULL DEFAULT '',
+                    confirmation_text TEXT NOT NULL DEFAULT '',
+                    template_choice TEXT,
+                    status TEXT NOT NULL,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS bid_artifacts (
+                    id TEXT PRIMARY KEY,
+                    workflow_id TEXT NOT NULL REFERENCES bid_workflows(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    path TEXT,
+                    content TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS behavior_report_emails (
+                    id TEXT PRIMARY KEY,
+                    workflow_id TEXT NOT NULL REFERENCES bid_workflows(id) ON DELETE CASCADE,
+                    recipient TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    error TEXT,
+                    zip_size INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    sent_at TEXT,
+                    UNIQUE(workflow_id, recipient)
+                );
+
+                CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_login_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS auth_sessions (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    revoked_at TEXT
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_active_bid_workflows_per_conversation
+                ON bid_workflows(conversation_id)
+                WHERE status IN ('uploaded', 'extracting', 'extraction_ready', 'generating', 'failed');
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
+                    kind,
+                    source_id,
+                    project_id,
+                    conversation_id,
+                    title,
+                    content
+                );
+                """
+            )
+            self._ensure_column("projects", "workspace_path", "TEXT")
+        self.ensure_default_project()
+
+    def _execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
+        return self._connection.execute(sql, tuple(params))
+
+    def _ensure_column(self, table: str, column: str, declaration: str) -> None:
+        columns = {row["name"] for row in self._connection.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+    def ensure_default_project(self) -> WorkbenchProject:
+        row = self._execute("SELECT * FROM projects ORDER BY created_at LIMIT 1").fetchone()
+        if row:
+            return self._project_from_row(row)
+        return self.create_project(WorkbenchProjectCreate(title=DEFAULT_PROJECT_TITLE))
+
+    def list_projects(self) -> list[WorkbenchProject]:
+        rows = self._execute("SELECT * FROM projects ORDER BY updated_at DESC").fetchall()
+        return [self._project_from_row(row) for row in rows]
+
+    def create_project(self, request: WorkbenchProjectCreate) -> WorkbenchProject:
+        project_id = str(uuid4())
+        now = utc_now()
+        title = request.title.strip() or DEFAULT_PROJECT_TITLE
+        workspace_path = request.workspace_path.strip() if request.workspace_path else None
+        with self._connection:
+            self._execute(
+                "INSERT INTO projects (id, title, workspace_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (project_id, title, workspace_path, now, now),
+            )
+            search_content = f"{title}\n{workspace_path or ''}".strip()
+            self._upsert_search("project", project_id, project_id, None, title, search_content)
+        return self.get_project(project_id)
+
+    def has_user(self) -> bool:
+        row = self._execute("SELECT 1 FROM users LIMIT 1").fetchone()
+        return row is not None
+
+    def create_user(self, username: str, password_hash: str) -> AuthUser:
+        if self.has_user():
+            raise ValueError("本机账号已存在。")
+        now = utc_now()
+        user_id = str(uuid4())
+        with self._connection:
+            self._execute(
+                """
+                INSERT INTO users (id, username, password_hash, created_at, updated_at, last_login_at)
+                VALUES (?, ?, ?, ?, ?, NULL)
+                """,
+                (user_id, username.strip(), password_hash, now, now),
+            )
+        return self.get_user(user_id)
+
+    def get_first_user(self) -> AuthUser | None:
+        row = self._execute("SELECT * FROM users ORDER BY created_at LIMIT 1").fetchone()
+        return self._user_from_row(row) if row else None
+
+    def get_user(self, user_id: str) -> AuthUser:
+        row = self._execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not row:
+            raise KeyError(user_id)
+        return self._user_from_row(row)
+
+    def get_user_auth_record_by_username(self, username: str) -> sqlite3.Row | None:
+        return self._execute("SELECT * FROM users WHERE username = ?", (username.strip(),)).fetchone()
+
+    def update_user_password_hash(self, user_id: str, password_hash: str) -> AuthUser:
+        now = utc_now()
+        with self._connection:
+            self._execute("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?", (password_hash, now, user_id))
+            self._execute("UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL", (now, user_id))
+        return self.get_user(user_id)
+
+    def update_user_last_login(self, user_id: str) -> AuthUser:
+        now = utc_now()
+        with self._connection:
+            self._execute("UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?", (now, now, user_id))
+        return self.get_user(user_id)
+
+    def create_auth_session(self, user_id: str, token_hash: str, expires_at: str) -> None:
+        now = utc_now()
+        with self._connection:
+            self._execute(
+                """
+                INSERT INTO auth_sessions (id, user_id, token_hash, created_at, expires_at, revoked_at)
+                VALUES (?, ?, ?, ?, ?, NULL)
+                """,
+                (str(uuid4()), user_id, token_hash, now, expires_at),
+            )
+
+    def get_auth_session_user(self, token_hash: str, now: str) -> AuthUser | None:
+        row = self._execute(
+            """
+            SELECT users.*
+            FROM auth_sessions
+            JOIN users ON users.id = auth_sessions.user_id
+            WHERE auth_sessions.token_hash = ?
+              AND auth_sessions.revoked_at IS NULL
+              AND auth_sessions.expires_at > ?
+            """,
+            (token_hash, now),
+        ).fetchone()
+        return self._user_from_row(row) if row else None
+
+    def revoke_auth_session(self, token_hash: str) -> None:
+        now = utc_now()
+        with self._connection:
+            self._execute("UPDATE auth_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL", (now, token_hash))
+
+    def get_project(self, project_id: str) -> WorkbenchProject:
+        row = self._execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if not row:
+            raise KeyError(project_id)
+        return self._project_from_row(row)
+
+    def update_project(self, project_id: str, request: WorkbenchProjectUpdate) -> WorkbenchProject:
+        project = self.get_project(project_id)
+        title = request.title.strip() if request.title is not None else project.title
+        workspace_path = request.workspace_path.strip() if request.workspace_path is not None and request.workspace_path.strip() else project.workspace_path
+        now = utc_now()
+        with self._connection:
+            self._execute(
+                "UPDATE projects SET title = ?, workspace_path = ?, updated_at = ? WHERE id = ?",
+                (title or project.title, workspace_path, now, project_id),
+            )
+            search_title = title or project.title
+            search_content = f"{search_title}\n{workspace_path or ''}".strip()
+            self._upsert_search("project", project_id, project_id, None, search_title, search_content)
+        return self.get_project(project_id)
+
+    def delete_project(self, project_id: str) -> None:
+        with self._connection:
+            self._execute("DELETE FROM projects WHERE id = ?", (project_id,))
+            self._execute("DELETE FROM search_index WHERE project_id = ?", (project_id,))
+        self.ensure_default_project()
+
+    def list_conversations(self, project_id: str | None = None) -> list[WorkbenchConversation]:
+        if project_id:
+            rows = self._execute("SELECT * FROM conversations WHERE project_id = ? ORDER BY updated_at DESC", (project_id,)).fetchall()
+        else:
+            rows = self._execute("SELECT * FROM conversations ORDER BY updated_at DESC").fetchall()
+        return [self._conversation_from_row(row) for row in rows]
+
+    def create_conversation(self, request: WorkbenchConversationCreate) -> WorkbenchConversation:
+        project_id = request.project_id or self.ensure_default_project().id
+        self.get_project(project_id)
+        conversation_id = str(uuid4())
+        now = utc_now()
+        title = request.title.strip() or "新对话"
+        with self._connection:
+            self._execute(
+                """
+                INSERT INTO conversations (id, project_id, title, provider_profile_id, model, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (conversation_id, project_id, title, request.provider_profile_id, request.model, now, now),
+            )
+            self._touch_project(project_id, now)
+            self._upsert_search("conversation", conversation_id, project_id, conversation_id, title, title)
+        return self.get_conversation(conversation_id)
+
+    def get_conversation(self, conversation_id: str) -> WorkbenchConversation:
+        row = self._execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
+        if not row:
+            raise KeyError(conversation_id)
+        return self._conversation_from_row(row)
+
+    def update_conversation(self, conversation_id: str, request: WorkbenchConversationUpdate) -> WorkbenchConversation:
+        conversation = self.get_conversation(conversation_id)
+        title = request.title.strip() if request.title is not None else conversation.title
+        provider_profile_id = request.provider_profile_id if request.provider_profile_id is not None else conversation.provider_profile_id
+        model = request.model if request.model is not None else conversation.model
+        now = utc_now()
+        with self._connection:
+            self._execute(
+                """
+                UPDATE conversations
+                SET title = ?, provider_profile_id = ?, model = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (title or conversation.title, provider_profile_id, model, now, conversation_id),
+            )
+            self._touch_project(conversation.project_id, now)
+            self._upsert_search(
+                "conversation",
+                conversation_id,
+                conversation.project_id,
+                conversation_id,
+                title or conversation.title,
+                title or conversation.title,
+            )
+        return self.get_conversation(conversation_id)
+
+    def delete_conversation(self, conversation_id: str) -> None:
+        conversation = self.get_conversation(conversation_id)
+        with self._connection:
+            self._execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+            self._execute("DELETE FROM search_index WHERE conversation_id = ?", (conversation_id,))
+            self._touch_project(conversation.project_id)
+
+    def create_bid_workflow(
+        self,
+        conversation_id: str,
+        file_name: str,
+        file_text: str,
+        provider_profile_id: str | None = None,
+    ) -> BidWorkflow:
+        conversation = self.get_conversation(conversation_id)
+        if provider_profile_id:
+            self.get_provider_profile(provider_profile_id)
+        existing = self.get_active_bid_workflow(conversation_id)
+        if existing:
+            raise ValueError("当前对话已有未完成的标书工作流。")
+
+        workflow_id = str(uuid4())
+        now = utc_now()
+        with self._connection:
+            self._execute(
+                """
+                INSERT INTO bid_workflows
+                    (id, project_id, conversation_id, provider_profile_id, file_name, file_text,
+                     extracted_markdown, confirmation_text, template_choice, status, error, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, '', '', NULL, ?, NULL, ?, ?)
+                """,
+                (
+                    workflow_id,
+                    conversation.project_id,
+                    conversation_id,
+                    provider_profile_id,
+                    file_name,
+                    file_text,
+                    BidWorkflowStatus.UPLOADED.value,
+                    now,
+                    now,
+                ),
+            )
+            self._touch_conversation(conversation_id, now)
+            self._touch_project(conversation.project_id, now)
+        return self.get_bid_workflow(workflow_id)
+
+    def get_bid_workflow(self, workflow_id: str) -> BidWorkflow:
+        row = self._execute("SELECT * FROM bid_workflows WHERE id = ?", (workflow_id,)).fetchone()
+        if not row:
+            raise KeyError(workflow_id)
+        return self._workflow_from_row(row)
+
+    def get_active_bid_workflow(self, conversation_id: str) -> BidWorkflow | None:
+        row = self._execute(
+            """
+            SELECT * FROM bid_workflows
+            WHERE conversation_id = ?
+              AND status IN ('uploaded', 'extracting', 'extraction_ready', 'generating', 'failed')
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (conversation_id,),
+        ).fetchone()
+        return self._workflow_from_row(row) if row else None
+
+    def list_bid_workflows(self, conversation_id: str | None = None) -> list[BidWorkflow]:
+        if conversation_id:
+            rows = self._execute(
+                "SELECT * FROM bid_workflows WHERE conversation_id = ? ORDER BY updated_at DESC",
+                (conversation_id,),
+            ).fetchall()
+        else:
+            rows = self._execute("SELECT * FROM bid_workflows ORDER BY updated_at DESC").fetchall()
+        return [self._workflow_from_row(row) for row in rows]
+
+    def update_bid_workflow_status(
+        self,
+        workflow_id: str,
+        status: BidWorkflowStatus,
+        error: str | None = None,
+    ) -> BidWorkflow:
+        workflow = self.get_bid_workflow(workflow_id)
+        now = utc_now()
+        with self._connection:
+            self._execute(
+                "UPDATE bid_workflows SET status = ?, error = ?, updated_at = ? WHERE id = ?",
+                (status.value, error, now, workflow_id),
+            )
+            self._touch_conversation(workflow.conversation_id, now)
+            self._touch_project(workflow.project_id, now)
+        return self.get_bid_workflow(workflow_id)
+
+    def save_bid_extraction(self, workflow_id: str, extracted_markdown: str) -> BidWorkflow:
+        workflow = self.get_bid_workflow(workflow_id)
+        now = utc_now()
+        with self._connection:
+            self._execute(
+                """
+                UPDATE bid_workflows
+                SET extracted_markdown = ?, status = ?, error = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (extracted_markdown, BidWorkflowStatus.EXTRACTION_READY.value, now, workflow_id),
+            )
+            self._touch_conversation(workflow.conversation_id, now)
+            self._touch_project(workflow.project_id, now)
+        return self.get_bid_workflow(workflow_id)
+
+    def save_bid_confirmation(self, workflow_id: str, confirmation_text: str) -> BidWorkflow:
+        workflow = self.get_bid_workflow(workflow_id)
+        now = utc_now()
+        with self._connection:
+            self._execute(
+                "UPDATE bid_workflows SET confirmation_text = ?, error = NULL, updated_at = ? WHERE id = ?",
+                (confirmation_text, now, workflow_id),
+            )
+            self._touch_conversation(workflow.conversation_id, now)
+            self._touch_project(workflow.project_id, now)
+        return self.get_bid_workflow(workflow_id)
+
+    def save_bid_template_choice(self, workflow_id: str, template_choice: str) -> BidWorkflow:
+        workflow = self.get_bid_workflow(workflow_id)
+        now = utc_now()
+        with self._connection:
+            self._execute(
+                "UPDATE bid_workflows SET template_choice = ?, error = NULL, updated_at = ? WHERE id = ?",
+                (template_choice, now, workflow_id),
+            )
+            self._touch_conversation(workflow.conversation_id, now)
+            self._touch_project(workflow.project_id, now)
+        return self.get_bid_workflow(workflow_id)
+
+    def save_bid_artifacts(self, workflow_id: str, files: dict[str, str]) -> list[ArtifactInfo]:
+        workflow = self.get_bid_workflow(workflow_id)
+        now = utc_now()
+        with self._connection:
+            self._execute("DELETE FROM bid_artifacts WHERE workflow_id = ?", (workflow_id,))
+            for name, content in files.items():
+                self._execute(
+                    """
+                    INSERT INTO bid_artifacts (id, workflow_id, name, kind, size, path, content, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)
+                    """,
+                    (
+                        str(uuid4()),
+                        workflow_id,
+                        name,
+                        self._artifact_kind(name),
+                        len(content.encode("utf-8")),
+                        content,
+                        now,
+                        now,
+                    ),
+                )
+            self._execute(
+                "UPDATE bid_workflows SET status = ?, error = NULL, updated_at = ? WHERE id = ?",
+                (BidWorkflowStatus.COMPLETED.value, now, workflow_id),
+            )
+            self._touch_conversation(workflow.conversation_id, now)
+            self._touch_project(workflow.project_id, now)
+        return self.list_bid_artifacts(workflow_id)
+
+    def list_bid_artifacts(self, workflow_id: str) -> list[ArtifactInfo]:
+        self.get_bid_workflow(workflow_id)
+        rows = self._execute(
+            "SELECT * FROM bid_artifacts WHERE workflow_id = ? ORDER BY created_at ASC",
+            (workflow_id,),
+        ).fetchall()
+        return [self._artifact_from_row(row) for row in rows]
+
+    def get_bid_artifact_content(self, workflow_id: str, name: str) -> str:
+        row = self._execute(
+            "SELECT content FROM bid_artifacts WHERE workflow_id = ? AND name = ?",
+            (workflow_id, name),
+        ).fetchone()
+        if not row or row["content"] is None:
+            raise KeyError(name)
+        return row["content"]
+
+    def get_bid_artifact_files(self, workflow_id: str) -> dict[str, str]:
+        self.get_bid_workflow(workflow_id)
+        rows = self._execute(
+            "SELECT name, content FROM bid_artifacts WHERE workflow_id = ? ORDER BY created_at ASC",
+            (workflow_id,),
+        ).fetchall()
+        return {row["name"]: row["content"] or "" for row in rows}
+
+    def list_behavior_report_emails(self, workflow_id: str) -> list[BehaviorReportEmail]:
+        self.get_bid_workflow(workflow_id)
+        rows = self._execute(
+            "SELECT * FROM behavior_report_emails WHERE workflow_id = ? ORDER BY created_at ASC",
+            (workflow_id,),
+        ).fetchall()
+        return [self._behavior_report_email_from_row(row) for row in rows]
+
+    def get_behavior_report_email(self, workflow_id: str, recipient: str) -> BehaviorReportEmail | None:
+        row = self._execute(
+            "SELECT * FROM behavior_report_emails WHERE workflow_id = ? AND recipient = ?",
+            (workflow_id, recipient),
+        ).fetchone()
+        return self._behavior_report_email_from_row(row) if row else None
+
+    def create_behavior_report_email(self, workflow_id: str, recipient: str, status: str = "pending") -> BehaviorReportEmail:
+        self.get_bid_workflow(workflow_id)
+        existing = self.get_behavior_report_email(workflow_id, recipient)
+        if existing:
+            return existing
+        now = utc_now()
+        record_id = str(uuid4())
+        with self._connection:
+            self._execute(
+                """
+                INSERT INTO behavior_report_emails (id, workflow_id, recipient, status, error, zip_size, created_at, sent_at)
+                VALUES (?, ?, ?, ?, NULL, 0, ?, NULL)
+                """,
+                (record_id, workflow_id, recipient, status, now),
+            )
+        return self.get_behavior_report_email(workflow_id, recipient)  # type: ignore[return-value]
+
+    def update_behavior_report_email(
+        self,
+        record_id: str,
+        status: str,
+        error: str | None = None,
+        zip_size: int = 0,
+        sent_at: str | None = None,
+    ) -> BehaviorReportEmail:
+        with self._connection:
+            self._execute(
+                """
+                UPDATE behavior_report_emails
+                SET status = ?, error = ?, zip_size = ?, sent_at = ?
+                WHERE id = ?
+                """,
+                (status, error, zip_size, sent_at, record_id),
+            )
+        row = self._execute("SELECT * FROM behavior_report_emails WHERE id = ?", (record_id,)).fetchone()
+        if not row:
+            raise KeyError(record_id)
+        return self._behavior_report_email_from_row(row)
+
+    def list_messages(self, conversation_id: str) -> list[WorkbenchMessage]:
+        rows = self._execute(
+            "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
+            (conversation_id,),
+        ).fetchall()
+        return [self._message_from_row(row) for row in rows]
+
+    def add_message(
+        self,
+        conversation_id: str,
+        role: str,
+        content: str,
+        status: str = "completed",
+        model: str | None = None,
+        finish_reason: str | None = None,
+        usage: dict[str, Any] | None = None,
+        error: str | None = None,
+        message_id: str | None = None,
+    ) -> WorkbenchMessage:
+        conversation = self.get_conversation(conversation_id)
+        message_id = message_id or str(uuid4())
+        now = utc_now()
+        with self._connection:
+            self._execute(
+                """
+                INSERT INTO messages
+                    (id, conversation_id, role, content, status, model, finish_reason, usage_json, error, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message_id,
+                    conversation_id,
+                    role,
+                    content,
+                    status,
+                    model,
+                    finish_reason,
+                    json.dumps(usage) if usage else None,
+                    error,
+                    now,
+                    now,
+                ),
+            )
+            self._touch_conversation(conversation_id, now)
+            self._touch_project(conversation.project_id, now)
+            self._upsert_search("message", message_id, conversation.project_id, conversation_id, role, content)
+        return self.get_message(message_id)
+
+    def update_message(
+        self,
+        message_id: str,
+        content: str,
+        status: str,
+        finish_reason: str | None = None,
+        usage: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> WorkbenchMessage:
+        message = self.get_message(message_id)
+        conversation = self.get_conversation(message.conversation_id)
+        now = utc_now()
+        with self._connection:
+            self._execute(
+                """
+                UPDATE messages
+                SET content = ?, status = ?, finish_reason = ?, usage_json = ?, error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (content, status, finish_reason, json.dumps(usage) if usage else None, error, now, message_id),
+            )
+            self._touch_conversation(message.conversation_id, now)
+            self._touch_project(conversation.project_id, now)
+            self._upsert_search("message", message_id, conversation.project_id, message.conversation_id, message.role, content)
+        return self.get_message(message_id)
+
+    def get_message(self, message_id: str) -> WorkbenchMessage:
+        row = self._execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
+        if not row:
+            raise KeyError(message_id)
+        return self._message_from_row(row)
+
+    def list_provider_profiles(self) -> list[ProviderProfile]:
+        rows = self._execute("SELECT * FROM provider_profiles ORDER BY updated_at DESC").fetchall()
+        return [self._provider_from_row(row) for row in rows]
+
+    def create_provider_profile(self, request: ProviderProfileCreate) -> ProviderProfile:
+        profile_id = str(uuid4())
+        now = utc_now()
+        credential_key = f"provider:{profile_id}"
+        with self._connection:
+            self._execute(
+                """
+                INSERT INTO provider_profiles (id, provider, display_name, base_url, model, credential_key, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    profile_id,
+                    request.provider,
+                    request.display_name,
+                    request.base_url,
+                    request.model,
+                    credential_key,
+                    now,
+                    now,
+                ),
+            )
+        credentials.set(credential_key, request.api_key)
+        return self.get_provider_profile(profile_id)
+
+    def get_provider_profile(self, profile_id: str) -> ProviderProfile:
+        row = self._execute("SELECT * FROM provider_profiles WHERE id = ?", (profile_id,)).fetchone()
+        if not row:
+            raise KeyError(profile_id)
+        return self._provider_from_row(row)
+
+    def update_provider_profile(self, profile_id: str, request: ProviderProfileUpdate) -> ProviderProfile:
+        profile = self.get_provider_profile(profile_id)
+        now = utc_now()
+        with self._connection:
+            self._execute(
+                """
+                UPDATE provider_profiles
+                SET provider = ?, display_name = ?, base_url = ?, model = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    request.provider if request.provider is not None else profile.provider,
+                    request.display_name if request.display_name is not None else profile.display_name,
+                    request.base_url if request.base_url is not None else profile.base_url,
+                    request.model if request.model is not None else profile.model,
+                    now,
+                    profile_id,
+                ),
+            )
+        credentials.set(profile.credential_key, request.api_key)
+        return self.get_provider_profile(profile_id)
+
+    def delete_provider_profile(self, profile_id: str) -> None:
+        profile = self.get_provider_profile(profile_id)
+        with self._connection:
+            self._execute("DELETE FROM provider_profiles WHERE id = ?", (profile_id,))
+        credentials.delete(profile.credential_key)
+
+    def resolve_api_key(self, profile_id: str | None, inline_api_key: str | None = None) -> str | None:
+        if inline_api_key:
+            return inline_api_key
+        if not profile_id:
+            return None
+        profile = self.get_provider_profile(profile_id)
+        return credentials.get(profile.credential_key)
+
+    def search(self, query: str) -> list[SearchResult]:
+        trimmed = query.strip()
+        if not trimmed:
+            return []
+        try:
+            rows = self._execute(
+                """
+                SELECT kind, source_id, project_id, conversation_id, title, snippet(search_index, 5, '', '', '...', 12) AS excerpt
+                FROM search_index
+                WHERE search_index MATCH ?
+                ORDER BY rank
+                LIMIT 30
+                """,
+                (trimmed,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        if not rows:
+            like_query = f"%{trimmed}%"
+            rows = self._execute(
+                """
+                SELECT kind, source_id, project_id, conversation_id, title, content AS excerpt
+                FROM search_index
+                WHERE title LIKE ? OR content LIKE ?
+                ORDER BY title
+                LIMIT 30
+                """,
+                (like_query, like_query),
+            ).fetchall()
+        return [
+            SearchResult(
+                kind=row["kind"],
+                id=row["source_id"],
+                title=row["title"] or row["kind"],
+                excerpt=row["excerpt"] or "",
+                conversation_id=row["conversation_id"],
+                project_id=row["project_id"],
+            )
+            for row in rows
+        ]
+
+    def _touch_project(self, project_id: str, when: str | None = None) -> None:
+        self._execute("UPDATE projects SET updated_at = ? WHERE id = ?", (when or utc_now(), project_id))
+
+    def _touch_conversation(self, conversation_id: str, when: str | None = None) -> None:
+        self._execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (when or utc_now(), conversation_id))
+
+    def _upsert_search(
+        self,
+        kind: str,
+        source_id: str,
+        project_id: str | None,
+        conversation_id: str | None,
+        title: str,
+        content: str,
+    ) -> None:
+        self._execute("DELETE FROM search_index WHERE kind = ? AND source_id = ?", (kind, source_id))
+        self._execute(
+            """
+            INSERT INTO search_index (kind, source_id, project_id, conversation_id, title, content)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (kind, source_id, project_id, conversation_id, title, content),
+        )
+
+    def _project_from_row(self, row: sqlite3.Row) -> WorkbenchProject:
+        return WorkbenchProject(
+            id=row["id"],
+            title=row["title"],
+            workspace_path=row["workspace_path"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def _user_from_row(self, row: sqlite3.Row) -> AuthUser:
+        return AuthUser(
+            id=row["id"],
+            username=row["username"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            last_login_at=row["last_login_at"],
+        )
+
+    def _conversation_from_row(self, row: sqlite3.Row) -> WorkbenchConversation:
+        return WorkbenchConversation(
+            id=row["id"],
+            project_id=row["project_id"],
+            title=row["title"],
+            provider_profile_id=row["provider_profile_id"],
+            model=row["model"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def _message_from_row(self, row: sqlite3.Row) -> WorkbenchMessage:
+        return WorkbenchMessage(
+            id=row["id"],
+            conversation_id=row["conversation_id"],
+            role=row["role"],
+            content=row["content"],
+            status=row["status"],
+            model=row["model"],
+            finish_reason=row["finish_reason"],
+            usage=json.loads(row["usage_json"]) if row["usage_json"] else None,
+            error=row["error"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def _provider_from_row(self, row: sqlite3.Row) -> ProviderProfile:
+        return ProviderProfile(
+            id=row["id"],
+            provider=row["provider"],
+            display_name=row["display_name"],
+            base_url=row["base_url"],
+            model=row["model"],
+            credential_key=row["credential_key"],
+            has_key=credentials.has(row["credential_key"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def _workflow_from_row(self, row: sqlite3.Row) -> BidWorkflow:
+        return BidWorkflow(
+            id=row["id"],
+            project_id=row["project_id"],
+            conversation_id=row["conversation_id"],
+            provider_profile_id=row["provider_profile_id"],
+            file_name=row["file_name"],
+            file_text=row["file_text"],
+            extracted_markdown=row["extracted_markdown"],
+            confirmation_text=row["confirmation_text"],
+            template_choice=row["template_choice"],
+            status=row["status"],
+            error=row["error"],
+            artifacts=self._list_bid_artifacts_unchecked(row["id"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def _list_bid_artifacts_unchecked(self, workflow_id: str) -> list[ArtifactInfo]:
+        rows = self._execute(
+            "SELECT * FROM bid_artifacts WHERE workflow_id = ? ORDER BY created_at ASC",
+            (workflow_id,),
+        ).fetchall()
+        return [self._artifact_from_row(row) for row in rows]
+
+    def _artifact_from_row(self, row: sqlite3.Row) -> ArtifactInfo:
+        return ArtifactInfo(name=row["name"], size=row["size"], kind=row["kind"])
+
+    def _behavior_report_email_from_row(self, row: sqlite3.Row) -> BehaviorReportEmail:
+        return BehaviorReportEmail(
+            id=row["id"],
+            workflow_id=row["workflow_id"],
+            recipient=row["recipient"],
+            status=row["status"],
+            error=row["error"],
+            zip_size=row["zip_size"],
+            created_at=row["created_at"],
+            sent_at=row["sent_at"],
+        )
+
+    def _artifact_kind(self, name: str) -> str:
+        if "信息提取" in name:
+            return "extraction"
+        if "设计方案" in name:
+            return "proposal"
+        if "绘图提示词" in name:
+            return "drawing"
+        if "标书制作规范" in name:
+            return "spec"
+        return "file"
+
+
+workbench_store = WorkbenchStore()
