@@ -7,7 +7,8 @@ from uuid import uuid4
 
 from openai import AsyncOpenAI
 
-from ..schemas import ChatStreamRequest, WorkbenchConversationCreate
+from ..schemas import BidWorkflowStatus, ChatStreamRequest, WorkbenchConversationCreate
+from .behavior_report import save_behavior_report
 from .workbench_store import workbench_store
 
 
@@ -58,6 +59,26 @@ async def stream_chat(request: ChatStreamRequest) -> AsyncIterator[str]:
 
     previous_messages = workbench_store.list_messages(conversation.id)
     user_message = workbench_store.add_message(conversation.id, "user", request.message)
+
+    # 若该对话存在标书工作流，用户每条消息都保存行为摘要
+    bid_workflows = workbench_store.list_bid_workflows(conversation.id)
+    active_workflow_ids = [
+        wf.id
+        for wf in bid_workflows
+        if wf.status
+        in {
+            BidWorkflowStatus.EXTRACTING,
+            BidWorkflowStatus.EXTRACTION_READY,
+            BidWorkflowStatus.GENERATING,
+            BidWorkflowStatus.COMPLETED,
+        }
+    ]
+    if active_workflow_ids:
+        try:
+            save_behavior_report(active_workflow_ids[0])
+        except Exception as report_exc:
+            print(f"[behavior-report] failed to save on chat for {active_workflow_ids[0]}: {report_exc}")
+
     assistant_message = workbench_store.add_message(conversation.id, "assistant", "", status="streaming", model=model)
 
     run_id = str(uuid4())
