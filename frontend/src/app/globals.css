@@ -594,8 +594,12 @@ textarea:focus {
 
 .user-panel {
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 9px;
+  flex: 0 1 auto;
   min-width: 0;
+  max-height: min(520px, calc(100vh - 190px));
+  overflow: hidden;
   border: 1px solid rgba(158, 168, 176, 0.22);
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.48);
@@ -631,6 +635,14 @@ textarea:focus {
 .user-panel-header button:hover {
   background: rgba(116, 128, 138, 0.1);
   color: #4c555c;
+}
+
+.user-panel-scroll {
+  display: grid;
+  gap: 9px;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .user-login-form {
@@ -695,10 +707,19 @@ textarea:focus {
 }
 
 .user-secondary-action {
+  width: 100%;
+  min-height: 38px;
   justify-content: center;
   background: #fff;
   color: #5d656b;
   border-color: var(--border);
+}
+
+.user-panel-actions {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid rgba(158, 168, 176, 0.18);
+  padding-top: 9px;
 }
 
 .user-detail {

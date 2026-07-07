@@ -441,11 +441,26 @@ export default function Home() {
   }
 
   async function startNewChat() {
-    setCurrentConversationId(null);
-    setMessages([]);
-    setActiveBidWorkflow(null);
-    setInput("");
     setError(null);
+    try {
+      const conversation = await createConversation({
+        project_id: currentProjectId ?? undefined,
+        title: "新对话",
+        provider_profile_id: currentProfileId ?? undefined,
+        model: currentProfile?.model,
+      });
+      if (!currentProjectId || conversation.project_id !== currentProjectId) {
+        setProjects(await listProjects());
+        setCurrentProjectId(conversation.project_id);
+      }
+      setCurrentConversationId(conversation.id);
+      setMessages([]);
+      setActiveBidWorkflow(null);
+      setInput("");
+      await refreshConversations(conversation.project_id);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
   }
 
   async function ensureConversation(text: string) {
@@ -1263,53 +1278,61 @@ export default function Home() {
                 ×
               </button>
             </div>
-            <div className="user-detail">
-              <span>当前账号</span>
-              <strong>{authUser?.username ?? "未登录"}</strong>
+            <div className="user-panel-scroll">
+              <div className="user-detail">
+                <span>当前账号</span>
+                <strong>{authUser?.username ?? "未登录"}</strong>
+              </div>
+              <div className="user-detail">
+                <span>数据范围</span>
+                <strong>本机单用户数据</strong>
+              </div>
+              <div className="avatar-settings">
+                <label>
+                  用户头像
+                  <input value={userChatAvatar} onChange={(event) => updateChatAvatar("user", event.target.value)} placeholder="文字、emoji 或图片 URL" />
+                </label>
+                <label>
+                  LLM 头像
+                  <input value={assistantChatAvatar} onChange={(event) => updateChatAvatar("assistant", event.target.value)} placeholder="文字、emoji 或图片 URL" />
+                </label>
+              </div>
+              <form className="user-login-form" onSubmit={changeCurrentPassword}>
+                <label>
+                  当前密码
+                  <input
+                    value={passwordForm.currentPassword}
+                    type="password"
+                    onChange={(event) => setPasswordForm({ ...passwordForm, currentPassword: event.target.value })}
+                    autoComplete="current-password"
+                  />
+                </label>
+                <label>
+                  新密码
+                  <input
+                    value={passwordForm.newPassword}
+                    type="password"
+                    onChange={(event) => setPasswordForm({ ...passwordForm, newPassword: event.target.value })}
+                    autoComplete="new-password"
+                  />
+                </label>
+                <label>
+                  确认新密码
+                  <input
+                    value={passwordForm.confirmPassword}
+                    type="password"
+                    onChange={(event) => setPasswordForm({ ...passwordForm, confirmPassword: event.target.value })}
+                    autoComplete="new-password"
+                  />
+                </label>
+                <button type="submit">修改密码</button>
+              </form>
             </div>
-            <div className="avatar-settings">
-              <label>
-                用户头像
-                <input value={userChatAvatar} onChange={(event) => updateChatAvatar("user", event.target.value)} placeholder="文字、emoji 或图片 URL" />
-              </label>
-              <label>
-                LLM 头像
-                <input value={assistantChatAvatar} onChange={(event) => updateChatAvatar("assistant", event.target.value)} placeholder="文字、emoji 或图片 URL" />
-              </label>
+            <div className="user-panel-actions">
+              <button type="button" className="user-secondary-action" onClick={logoutUser}>
+                退出登录
+              </button>
             </div>
-            <form className="user-login-form" onSubmit={changeCurrentPassword}>
-              <label>
-                当前密码
-                <input
-                  value={passwordForm.currentPassword}
-                  type="password"
-                  onChange={(event) => setPasswordForm({ ...passwordForm, currentPassword: event.target.value })}
-                  autoComplete="current-password"
-                />
-              </label>
-              <label>
-                新密码
-                <input
-                  value={passwordForm.newPassword}
-                  type="password"
-                  onChange={(event) => setPasswordForm({ ...passwordForm, newPassword: event.target.value })}
-                  autoComplete="new-password"
-                />
-              </label>
-              <label>
-                确认新密码
-                <input
-                  value={passwordForm.confirmPassword}
-                  type="password"
-                  onChange={(event) => setPasswordForm({ ...passwordForm, confirmPassword: event.target.value })}
-                  autoComplete="new-password"
-                />
-              </label>
-              <button type="submit">修改密码</button>
-            </form>
-            <button type="button" className="user-secondary-action" onClick={logoutUser}>
-              退出登录
-            </button>
           </section>
         )}
 
