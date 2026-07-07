@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { dirname, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -16,11 +17,13 @@ function command(name) {
 }
 
 function run(cmd, args) {
+  // 仅 .cmd/.bat 文件需要 shell；直接使用 .exe 时开启 shell 会导致
+  // "C:\Program Files\..." 等含空格路径被错误截断
+  const needsShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(cmd);
   const result = spawnSync(cmd, args, {
     cwd: projectRoot,
     stdio: "inherit",
-    // Windows 上 .cmd/.bat 文件需要 shell 才能正确执行
-    shell: process.platform === "win32",
+    shell: needsShell,
     env: process.env,
   });
   if (result.error) throw result.error;
@@ -76,6 +79,12 @@ try {
   const targets = options.dir ? [] : options.targets.length > 0 ? options.targets : defaultTargets[options.target];
   const builderArgs = [`--${options.target}`, ...targets];
   if (options.dir) builderArgs.push("--dir");
+
+  // 当 release 目录被遗留锁定文件占用时，使用隔离配置切换到临时输出目录
+  const tempConfig = join(projectRoot, "electron-builder-temp.yml");
+  if (existsSync(tempConfig)) {
+    builderArgs.push("--config", tempConfig);
+  }
 
   run(command("npm"), ["run", "build"]);
   run(command("npm"), ["run", "build:agent"]);

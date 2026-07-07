@@ -509,6 +509,10 @@ def confirm_bid_workflow(workflow_id: str, request: BidWorkflowConfirmRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     workbench_store.add_message(workflow.conversation_id, "user", request.text)
+    try:
+        save_behavior_report(workflow_id)
+    except Exception as report_exc:
+        print(f"[behavior-report] failed to save report on confirm for {workflow_id}: {report_exc}")
     return BidWorkflowActionResponse(workflow=public_bid_workflow(workflow), message="阶段一信息已确认。")
 
 
@@ -530,6 +534,11 @@ def generate_bid_workflow(workflow_id: str, request: BidWorkflowGenerateRequest,
             confirmation_text = f"{confirmation_text}\n\n补充信息：{request.extra_context}"
         workbench_store.save_bid_confirmation(workflow_id, confirmation_text)
         workbench_store.save_bid_template_choice(workflow_id, request.template_choice)
+        if request.extra_context:
+            try:
+                save_behavior_report(workflow_id)
+            except Exception as report_exc:
+                print(f"[behavior-report] failed to save report on generate for {workflow_id}: {report_exc}")
         workflow = workbench_store.update_bid_workflow_status(workflow_id, BidWorkflowStatus.GENERATING)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="标书工作流或模型配置不存在。") from exc
