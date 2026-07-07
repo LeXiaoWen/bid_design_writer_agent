@@ -62,11 +62,11 @@
 - FTS5 全文搜索：搜索项目标题、对话标题、消息内容。
 - 侧边栏可折叠，折叠态仅显示图标。
 
-### 2.6 行为摘要邮件
+### 2.6 行为摘要
 
-- 阶段二生成完成后，自动打包「用户行为与需求摘要」和本次 Markdown 成果，通过 SMTP 发送。
-- 发送失败不影响成果下载；支持手动重试。
-- 可通过环境变量关闭或修改收件人。
+- 阶段二生成完成后，自动提取「用户行为与需求摘要」并保存到本机应用数据目录。
+- 保存失败不影响成果下载。
+- 不发送邮件，不上传原始招标文件、上传原文件或完整聊天记录。
 
 ---
 
@@ -88,7 +88,7 @@
         ↓
   阶段二：选择模板 → AI 生成方案 → 预览 + 下载
         ↓
-  自动发送行为摘要邮件（可选）
+  本地保存行为摘要
 ```
 
 ---
@@ -120,7 +120,7 @@ SQLite 数据库（WAL 模式，FTS5 全文搜索）
   ├── users, auth_sessions
   ├── projects, conversations, messages
   ├── provider_profiles
-  └── bid_workflows, bid_artifacts, behavior_report_emails
+  └── bid_workflows, bid_artifacts
 ```
 
 ### 4.2 前端
@@ -157,7 +157,6 @@ SQLite 数据库（WAL 模式，FTS5 全文搜索）
 | AI 调用 | openai SDK（OpenAI-compatible） |
 | 密码哈希 | argon2-cffi (Argon2id) |
 | 凭据存储 | keyring（系统钥匙串） |
-| 邮件 | smtplib + email |
 
 **服务模块**（`backend/services/`）：
 
@@ -170,7 +169,7 @@ SQLite 数据库（WAL 模式，FTS5 全文搜索）
 | `auth.py` | 用户注册/登录/登出/改密，session 管理 |
 | `workbench_store.py` | SQLite 数据库操作，FTS5 搜索，keyring 集成 |
 | `workbench_llm.py` | SSE 流式聊天与取消 |
-| `behavior_report_email.py` | 行为摘要邮件生成与发送 |
+| `behavior_report.py` | 行为摘要提取与本地保存 |
 | `config.py` | API Provider 预设管理 |
 | `provider_models.py` | 远程模型列表拉取 |
 
@@ -211,7 +210,6 @@ SQLite 数据库（WAL 模式，FTS5 全文搜索）
 | `provider_profiles` | 模型配置（不含 API key 明文） |
 | `bid_workflows` | 标书工作流（状态、阶段一/二结果、模板选择） |
 | `bid_artifacts` | 成果文件（文件名、内容、大小、类型） |
-| `behavior_report_emails` | 行为摘要邮件发送记录 |
 
 ### 4.6 打包分发
 
@@ -385,9 +383,6 @@ PyInstaller 打包流程：创建隔离的 `.agent-venv` 虚拟环境 → 安装
 | GET | `/api/v1/bid-workflows/{id}/artifacts` | 成果列表 |
 | GET | `/api/v1/bid-workflows/{id}/artifacts/{name}` | 下载单个成果 |
 | GET | `/api/v1/bid-workflows/{id}/export.zip` | 下载成果 ZIP |
-| GET | `/api/v1/bid-workflows/{id}/report-email-status` | 邮件发送状态 |
-| POST | `/api/v1/bid-workflows/{id}/report-email/retry` | 重试邮件发送 |
-
 ---
 
 ## 10. 开发与构建

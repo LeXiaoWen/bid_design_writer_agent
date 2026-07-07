@@ -5,6 +5,7 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import RLock
 from typing import Any, Iterable, Optional
 from uuid import uuid4
 
@@ -19,7 +20,6 @@ except Exception:  # pragma: no cover - exercised only when optional backend is 
 from ..schemas import (
     ArtifactInfo,
     AuthUser,
-    BehaviorReportEmail,
     BidWorkflow,
     BidWorkflowStatus,
     ProviderProfile,
@@ -133,6 +133,7 @@ credentials = CredentialStore()
 class WorkbenchStore:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or db_path()
+        self._lock = RLock()
         self._connection = sqlite3.connect(self.path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
@@ -140,7 +141,7 @@ class WorkbenchStore:
         self._init_schema()
 
     def _init_schema(self) -> None:
-        with self._connection:
+        with self._lock, self._connection:
             self._connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS projects (
@@ -214,18 +215,6 @@ class WorkbenchStore:
                     updated_at TEXT NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS behavior_report_emails (
-                    id TEXT PRIMARY KEY,
-                    workflow_id TEXT NOT NULL REFERENCES bid_workflows(id) ON DELETE CASCADE,
-                    recipient TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    error TEXT,
-                    zip_size INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    sent_at TEXT,
-                    UNIQUE(workflow_id, recipient)
-                );
-
                 CREATE TABLE IF NOT EXISTS users (
                     id TEXT PRIMARY KEY,
                     username TEXT NOT NULL UNIQUE,
@@ -259,15 +248,22 @@ class WorkbenchStore:
                 """
             )
             self._ensure_column("projects", "workspace_path", "TEXT")
+            self._ensure_single_user_index()
         self.ensure_default_project()
 
     def _execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
-        return self._connection.execute(sql, tuple(params))
+        with self._lock:
+            return self._connection.execute(sql, tuple(params))
 
     def _ensure_column(self, table: str, column: str, declaration: str) -> None:
         columns = {row["name"] for row in self._connection.execute(f"PRAGMA table_info({table})").fetchall()}
         if column not in columns:
             self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+    def _ensure_single_user_index(self) -> None:
+        count = self._execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]
+        if count <= 1:
+            self._execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_single_user ON users ((1))")
 
     def ensure_default_project(self) -> WorkbenchProject:
         row = self._execute("SELECT * FROM projects ORDER BY created_at LIMIT 1").fetchone()
@@ -284,7 +280,7 @@ class WorkbenchStore:
         now = utc_now()
         title = request.title.strip() or DEFAULT_PROJECT_TITLE
         workspace_path = request.workspace_path.strip() if request.workspace_path else None
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 "INSERT INTO projects (id, title, workspace_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
                 (project_id, title, workspace_path, now, now),
@@ -298,18 +294,22 @@ class WorkbenchStore:
         return row is not None
 
     def create_user(self, username: str, password_hash: str) -> AuthUser:
-        if self.has_user():
-            raise ValueError("本机账号已存在。")
-        now = utc_now()
-        user_id = str(uuid4())
-        with self._connection:
-            self._execute(
-                """
-                INSERT INTO users (id, username, password_hash, created_at, updated_at, last_login_at)
-                VALUES (?, ?, ?, ?, ?, NULL)
-                """,
-                (user_id, username.strip(), password_hash, now, now),
-            )
+        with self._lock:
+            if self.has_user():
+                raise ValueError("本机账号已存在。")
+            now = utc_now()
+            user_id = str(uuid4())
+            try:
+                with self._lock, self._connection:
+                    self._execute(
+                        """
+                        INSERT INTO users (id, username, password_hash, created_at, updated_at, last_login_at)
+                        VALUES (?, ?, ?, ?, ?, NULL)
+                        """,
+                        (user_id, username.strip(), password_hash, now, now),
+                    )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("本机账号已存在。") from exc
         return self.get_user(user_id)
 
     def get_first_user(self) -> AuthUser | None:
@@ -327,20 +327,20 @@ class WorkbenchStore:
 
     def update_user_password_hash(self, user_id: str, password_hash: str) -> AuthUser:
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?", (password_hash, now, user_id))
             self._execute("UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL", (now, user_id))
         return self.get_user(user_id)
 
     def update_user_last_login(self, user_id: str) -> AuthUser:
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute("UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?", (now, now, user_id))
         return self.get_user(user_id)
 
     def create_auth_session(self, user_id: str, token_hash: str, expires_at: str) -> None:
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 """
                 INSERT INTO auth_sessions (id, user_id, token_hash, created_at, expires_at, revoked_at)
@@ -365,7 +365,7 @@ class WorkbenchStore:
 
     def revoke_auth_session(self, token_hash: str) -> None:
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute("UPDATE auth_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL", (now, token_hash))
 
     def get_project(self, project_id: str) -> WorkbenchProject:
@@ -379,7 +379,7 @@ class WorkbenchStore:
         title = request.title.strip() if request.title is not None else project.title
         workspace_path = request.workspace_path.strip() if request.workspace_path is not None and request.workspace_path.strip() else project.workspace_path
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 "UPDATE projects SET title = ?, workspace_path = ?, updated_at = ? WHERE id = ?",
                 (title or project.title, workspace_path, now, project_id),
@@ -390,7 +390,7 @@ class WorkbenchStore:
         return self.get_project(project_id)
 
     def delete_project(self, project_id: str) -> None:
-        with self._connection:
+        with self._lock, self._connection:
             self._execute("DELETE FROM projects WHERE id = ?", (project_id,))
             self._execute("DELETE FROM search_index WHERE project_id = ?", (project_id,))
         self.ensure_default_project()
@@ -408,7 +408,7 @@ class WorkbenchStore:
         conversation_id = str(uuid4())
         now = utc_now()
         title = request.title.strip() or "新对话"
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 """
                 INSERT INTO conversations (id, project_id, title, provider_profile_id, model, created_at, updated_at)
@@ -432,7 +432,7 @@ class WorkbenchStore:
         provider_profile_id = request.provider_profile_id if request.provider_profile_id is not None else conversation.provider_profile_id
         model = request.model if request.model is not None else conversation.model
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 """
                 UPDATE conversations
@@ -454,7 +454,7 @@ class WorkbenchStore:
 
     def delete_conversation(self, conversation_id: str) -> None:
         conversation = self.get_conversation(conversation_id)
-        with self._connection:
+        with self._lock, self._connection:
             self._execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
             self._execute("DELETE FROM search_index WHERE conversation_id = ?", (conversation_id,))
             self._touch_project(conversation.project_id)
@@ -475,7 +475,7 @@ class WorkbenchStore:
 
         workflow_id = str(uuid4())
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 """
                 INSERT INTO bid_workflows
@@ -536,7 +536,7 @@ class WorkbenchStore:
     ) -> BidWorkflow:
         workflow = self.get_bid_workflow(workflow_id)
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 "UPDATE bid_workflows SET status = ?, error = ?, updated_at = ? WHERE id = ?",
                 (status.value, error, now, workflow_id),
@@ -548,7 +548,7 @@ class WorkbenchStore:
     def save_bid_extraction(self, workflow_id: str, extracted_markdown: str) -> BidWorkflow:
         workflow = self.get_bid_workflow(workflow_id)
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 """
                 UPDATE bid_workflows
@@ -564,7 +564,7 @@ class WorkbenchStore:
     def save_bid_confirmation(self, workflow_id: str, confirmation_text: str) -> BidWorkflow:
         workflow = self.get_bid_workflow(workflow_id)
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 "UPDATE bid_workflows SET confirmation_text = ?, error = NULL, updated_at = ? WHERE id = ?",
                 (confirmation_text, now, workflow_id),
@@ -576,7 +576,7 @@ class WorkbenchStore:
     def save_bid_template_choice(self, workflow_id: str, template_choice: str) -> BidWorkflow:
         workflow = self.get_bid_workflow(workflow_id)
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 "UPDATE bid_workflows SET template_choice = ?, error = NULL, updated_at = ? WHERE id = ?",
                 (template_choice, now, workflow_id),
@@ -588,7 +588,7 @@ class WorkbenchStore:
     def save_bid_artifacts(self, workflow_id: str, files: dict[str, str]) -> list[ArtifactInfo]:
         workflow = self.get_bid_workflow(workflow_id)
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute("DELETE FROM bid_artifacts WHERE workflow_id = ?", (workflow_id,))
             for name, content in files.items():
                 self._execute(
@@ -640,60 +640,6 @@ class WorkbenchStore:
         ).fetchall()
         return {row["name"]: row["content"] or "" for row in rows}
 
-    def list_behavior_report_emails(self, workflow_id: str) -> list[BehaviorReportEmail]:
-        self.get_bid_workflow(workflow_id)
-        rows = self._execute(
-            "SELECT * FROM behavior_report_emails WHERE workflow_id = ? ORDER BY created_at ASC",
-            (workflow_id,),
-        ).fetchall()
-        return [self._behavior_report_email_from_row(row) for row in rows]
-
-    def get_behavior_report_email(self, workflow_id: str, recipient: str) -> BehaviorReportEmail | None:
-        row = self._execute(
-            "SELECT * FROM behavior_report_emails WHERE workflow_id = ? AND recipient = ?",
-            (workflow_id, recipient),
-        ).fetchone()
-        return self._behavior_report_email_from_row(row) if row else None
-
-    def create_behavior_report_email(self, workflow_id: str, recipient: str, status: str = "pending") -> BehaviorReportEmail:
-        self.get_bid_workflow(workflow_id)
-        existing = self.get_behavior_report_email(workflow_id, recipient)
-        if existing:
-            return existing
-        now = utc_now()
-        record_id = str(uuid4())
-        with self._connection:
-            self._execute(
-                """
-                INSERT INTO behavior_report_emails (id, workflow_id, recipient, status, error, zip_size, created_at, sent_at)
-                VALUES (?, ?, ?, ?, NULL, 0, ?, NULL)
-                """,
-                (record_id, workflow_id, recipient, status, now),
-            )
-        return self.get_behavior_report_email(workflow_id, recipient)  # type: ignore[return-value]
-
-    def update_behavior_report_email(
-        self,
-        record_id: str,
-        status: str,
-        error: str | None = None,
-        zip_size: int = 0,
-        sent_at: str | None = None,
-    ) -> BehaviorReportEmail:
-        with self._connection:
-            self._execute(
-                """
-                UPDATE behavior_report_emails
-                SET status = ?, error = ?, zip_size = ?, sent_at = ?
-                WHERE id = ?
-                """,
-                (status, error, zip_size, sent_at, record_id),
-            )
-        row = self._execute("SELECT * FROM behavior_report_emails WHERE id = ?", (record_id,)).fetchone()
-        if not row:
-            raise KeyError(record_id)
-        return self._behavior_report_email_from_row(row)
-
     def list_messages(self, conversation_id: str) -> list[WorkbenchMessage]:
         rows = self._execute(
             "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
@@ -716,7 +662,7 @@ class WorkbenchStore:
         conversation = self.get_conversation(conversation_id)
         message_id = message_id or str(uuid4())
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 """
                 INSERT INTO messages
@@ -754,7 +700,7 @@ class WorkbenchStore:
         message = self.get_message(message_id)
         conversation = self.get_conversation(message.conversation_id)
         now = utc_now()
-        with self._connection:
+        with self._lock, self._connection:
             self._execute(
                 """
                 UPDATE messages
@@ -782,24 +728,29 @@ class WorkbenchStore:
         profile_id = str(uuid4())
         now = utc_now()
         credential_key = f"provider:{profile_id}"
-        with self._connection:
-            self._execute(
-                """
-                INSERT INTO provider_profiles (id, provider, display_name, base_url, model, credential_key, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    profile_id,
-                    request.provider,
-                    request.display_name,
-                    request.base_url,
-                    request.model,
-                    credential_key,
-                    now,
-                    now,
-                ),
-            )
         credentials.set(credential_key, request.api_key)
+        try:
+            with self._lock, self._connection:
+                self._execute(
+                    """
+                    INSERT INTO provider_profiles (id, provider, display_name, base_url, model, credential_key, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        profile_id,
+                        request.provider,
+                        request.display_name,
+                        request.base_url,
+                        request.model,
+                        credential_key,
+                        now,
+                        now,
+                    ),
+                )
+        except Exception:
+            if request.api_key:
+                credentials.delete(credential_key)
+            raise
         return self.get_provider_profile(profile_id)
 
     def get_provider_profile(self, profile_id: str) -> ProviderProfile:
@@ -811,7 +762,8 @@ class WorkbenchStore:
     def update_provider_profile(self, profile_id: str, request: ProviderProfileUpdate) -> ProviderProfile:
         profile = self.get_provider_profile(profile_id)
         now = utc_now()
-        with self._connection:
+        credentials.set(profile.credential_key, request.api_key)
+        with self._lock, self._connection:
             self._execute(
                 """
                 UPDATE provider_profiles
@@ -827,12 +779,11 @@ class WorkbenchStore:
                     profile_id,
                 ),
             )
-        credentials.set(profile.credential_key, request.api_key)
         return self.get_provider_profile(profile_id)
 
     def delete_provider_profile(self, profile_id: str) -> None:
         profile = self.get_provider_profile(profile_id)
-        with self._connection:
+        with self._lock, self._connection:
             self._execute("DELETE FROM provider_profiles WHERE id = ?", (profile_id,))
         credentials.delete(profile.credential_key)
 
@@ -993,18 +944,6 @@ class WorkbenchStore:
 
     def _artifact_from_row(self, row: sqlite3.Row) -> ArtifactInfo:
         return ArtifactInfo(name=row["name"], size=row["size"], kind=row["kind"])
-
-    def _behavior_report_email_from_row(self, row: sqlite3.Row) -> BehaviorReportEmail:
-        return BehaviorReportEmail(
-            id=row["id"],
-            workflow_id=row["workflow_id"],
-            recipient=row["recipient"],
-            status=row["status"],
-            error=row["error"],
-            zip_size=row["zip_size"],
-            created_at=row["created_at"],
-            sent_at=row["sent_at"],
-        )
 
     def _artifact_kind(self, name: str) -> str:
         if "信息提取" in name:

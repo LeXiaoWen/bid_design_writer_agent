@@ -28,7 +28,12 @@ a = Analysis(
     [str(entry_script)],
     pathex=[str(project_root)],
     binaries=[],
-    datas=[],
+    datas=[
+        (
+            str(project_root / "backend" / "bundled_skills"),
+            "backend/bundled_skills",
+        ),
+    ],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

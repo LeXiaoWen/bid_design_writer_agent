@@ -9,7 +9,7 @@
     "dev": "concurrently \"npm run dev:ui\" \"npm run dev:agent\" \"npm run dev:electron\" --names ui,agent,electron --prefix-colors blue,green,magenta --kill-others",
     "dev:debug": "LOG_LEVEL=debug npm run dev",
     "dev:ui": "npm --prefix frontend run dev",
-    "dev:agent": "./scripts/run-agent.sh || scripts\\run-agent.bat",
+    "dev:agent": "node scripts/run-agent.js",
     "dev:electron": "wait-on http://localhost:3000 && npm run build:desktop && node scripts/run-electron.mjs",
     "build": "npm --prefix frontend run build && npm run build:desktop",
     "build:agent": "node scripts/build-agent.mjs",
@@ -25,7 +25,7 @@
     "dist:win:nsis": "node scripts/package-desktop.mjs --target win --targets nsis",
     "dist:win:zip": "node scripts/package-desktop.mjs --target win --targets zip",
     "dist:linux": "node scripts/package-desktop.mjs --target linux --targets AppImage,tar.gz",
-    "install:agent": "./scripts/setup-agent.sh || scripts\\setup-agent.bat",
+    "install:agent": "node scripts/setup-agent.js",
     "typecheck": "npm --prefix frontend run typecheck && npm run build:desktop",
     "test:backend": "PYTHONPATH=. pytest -p no:capture backend/tests",
     "test:frontend": "npm --prefix frontend run test:unit"

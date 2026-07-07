@@ -65,7 +65,6 @@ export type BidWorkflow = {
   conversation_id: string;
   provider_profile_id?: string | null;
   file_name: string;
-  file_text: string;
   extracted_markdown: string;
   confirmation_text: string;
   template_choice?: string | null;
@@ -98,7 +97,6 @@ export type SearchResult = {
 export type HealthResponse = {
   ok: boolean;
   app: string;
-  legacy_app?: string;
   version: string;
   database: string;
   presets: Record<string, { provider: string; base_url: string; model: string }>;

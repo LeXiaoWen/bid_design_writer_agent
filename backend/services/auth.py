@@ -12,7 +12,14 @@ from .workbench_store import utc_now, workbench_store
 
 
 SESSION_HOURS = 8
+MAX_LOGIN_FAILURES = 5
+LOGIN_LOCK_SECONDS = 60
 _hasher = PasswordHasher()
+_login_failures: dict[str, tuple[int, datetime | None]] = {}
+
+
+class AuthRateLimitError(ValueError):
+    pass
 
 
 def _hash_token(token: str) -> str:
@@ -23,21 +30,51 @@ def _expires_at() -> str:
     return (datetime.now(timezone.utc) + timedelta(hours=SESSION_HOURS)).isoformat()
 
 
+def _login_key(username: str) -> str:
+    return username.strip().casefold() or "<empty>"
+
+
+def _check_login_allowed(username: str) -> None:
+    key = _login_key(username)
+    count, locked_until = _login_failures.get(key, (0, None))
+    if count >= MAX_LOGIN_FAILURES and locked_until and locked_until > datetime.now(timezone.utc):
+        raise AuthRateLimitError("登录失败次数过多，请稍后再试。")
+    if locked_until and locked_until <= datetime.now(timezone.utc):
+        _login_failures.pop(key, None)
+
+
+def _record_login_failure(username: str) -> None:
+    key = _login_key(username)
+    count, locked_until = _login_failures.get(key, (0, None))
+    count += 1
+    if count >= MAX_LOGIN_FAILURES:
+        locked_until = datetime.now(timezone.utc) + timedelta(seconds=LOGIN_LOCK_SECONDS)
+    _login_failures[key] = (count, locked_until)
+
+
+def _clear_login_failures(username: str) -> None:
+    _login_failures.pop(_login_key(username), None)
+
+
 def setup_user(username: str, password: str) -> AuthUser:
     return workbench_store.create_user(username.strip(), _hasher.hash(password))
 
 
 def login_user(username: str, password: str) -> AuthLoginResponse:
+    _check_login_allowed(username)
     row = workbench_store.get_user_auth_record_by_username(username)
     if not row:
+        _record_login_failure(username)
         raise ValueError("用户名或密码错误。")
     try:
         verified = _hasher.verify(row["password_hash"], password)
     except (VerifyMismatchError, VerificationError):
         verified = False
     if not verified:
+        _record_login_failure(username)
         raise ValueError("用户名或密码错误。")
 
+    _clear_login_failures(username)
     if _hasher.check_needs_rehash(row["password_hash"]):
         workbench_store.update_user_password_hash(row["id"], _hasher.hash(password))
 

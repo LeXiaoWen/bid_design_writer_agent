@@ -100,7 +100,7 @@ OpenAI-compatible model + bid-design-writer Skill files
 | `backend/services/llm.py` | 已修复 OpenAI-compatible role map | 可迁移为 LangChain ChatOpenAI 配置工具，或保留兼容 |
 | `backend/services/artifacts.py` | 已实现成果拆分、命名、ZIP | LangGraph `generate_artifacts` / download service 复用 |
 | `backend/services/config.py` | 已实现 API preset | 前端配置面板和 agent model 配置复用 |
-| `backend/services/project_store.py` | 已实现项目状态雏形 | 迁移为 LangGraph state 或作为过渡 store |
+| `backend/services/workbench_store.py` | 已实现 SQLite 项目、对话、workflow 与成果存储 | 当前工作台状态和成果下载服务 |
 | `desktop/main.ts` | 已实现 Electron 启动和后端探活 | 保留并调整为拉起 UI + LangGraph agent |
 | `scripts/run-electron.mjs` | 已适配本机 Electron fallback | 保留 |
 
@@ -284,13 +284,13 @@ V1 必需 tools：
 
 | Tool | 作用 | 复用代码 |
 | --- | --- | --- |
-| `get_project_state` | 返回当前项目状态 | `project_store.py` 或 LangGraph state |
+| `get_project_state` | 返回当前项目状态 | `workbench_store.py` |
 | `parse_tender_file` | 解析上传文件 | `document_parser.py` |
 | `extract_project_info` | 执行阶段一提取 | `skill_loader.py` + LLM 调用 |
 | `revise_extraction` | 根据用户修正更新阶段一结果 | `skill_loader.py` + LLM 调用 |
 | `confirm_extraction` | 确认阶段一并进入模板选择 | state update |
 | `generate_bid_proposal` | 执行阶段二生成 | `skill_loader.py` + LLM 调用 |
-| `list_artifacts` | 返回成果列表 | `artifacts.py` |
+| `list_artifacts` | 返回成果列表 | `workbench_store.py` |
 | `export_artifacts_zip` | 打包 ZIP | `artifacts.py` |
 
 前端工具可选：

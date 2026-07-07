@@ -3,8 +3,6 @@ import re
 import zipfile
 from typing import Dict, List
 
-from ..schemas import ArtifactInfo
-
 
 def infer_project_name(text: str) -> str:
     patterns = [
@@ -180,23 +178,6 @@ def build_output_files(extracted_markdown: str, design_proposal: str) -> Dict[st
         f"{project_name}_绘图提示词_图纸需求清单.md": drawing_prompts,
         f"{project_name}_标书制作规范.md": bid_specs,
     }
-
-
-def list_artifacts(files: Dict[str, str]) -> List[ArtifactInfo]:
-    infos = []
-    for name, content in files.items():
-        if "信息提取" in name:
-            kind = "extraction"
-        elif "设计方案" in name:
-            kind = "proposal"
-        elif "绘图提示词" in name:
-            kind = "drawing"
-        elif "标书制作规范" in name:
-            kind = "spec"
-        else:
-            kind = "file"
-        infos.append(ArtifactInfo(name=name, size=len(content.encode("utf-8")), kind=kind))
-    return infos
 
 
 def make_zip(files: Dict[str, str]) -> bytes:

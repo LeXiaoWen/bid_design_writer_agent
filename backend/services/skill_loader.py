@@ -4,28 +4,38 @@ from pathlib import Path
 
 from .config import TEMPLATE_FILES
 
+BUNDLED_SKILL_NAME = "bid_design_writer"
+BUNDLED_SKILL_DISPLAY = f"bundled:{BUNDLED_SKILL_NAME}"
+
+
+def bundled_skill_dir() -> Path:
+    return Path(__file__).resolve().parents[1] / "bundled_skills" / BUNDLED_SKILL_NAME
+
 
 def resolve_skill_dir() -> Path:
-    candidates = [
-        os.getenv("BID_DESIGN_WRITER_SKILL_DIR", ""),
-        "~/.claude/skills/bid-design-writer",
-        "~/.cc-switch/skills/bid-design-writer",
-    ]
-    for candidate in candidates:
-        if not candidate:
-            continue
-        skill_dir = Path(candidate).expanduser()
-        if (skill_dir / "SKILL.md").exists():
-            return skill_dir
-    return Path("~/.claude/skills/bid-design-writer").expanduser()
+    override = os.getenv("BID_DESIGN_WRITER_SKILL_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return bundled_skill_dir()
+
+
+def skill_source_label() -> str:
+    if os.getenv("BID_DESIGN_WRITER_SKILL_DIR", "").strip():
+        return str(resolve_skill_dir())
+    return BUNDLED_SKILL_DISPLAY
 
 
 @lru_cache(maxsize=16)
-def load_skill_file(relative_path: str) -> str:
-    path = resolve_skill_dir() / relative_path
+def _load_skill_file(skill_dir: str, relative_path: str) -> str:
+    path = Path(skill_dir) / relative_path
     if not path.exists():
-        raise FileNotFoundError(f"未找到 Skill 引用文件：{path}")
+        source = "外部覆盖路径" if os.getenv("BID_DESIGN_WRITER_SKILL_DIR", "").strip() else "内置资源"
+        raise FileNotFoundError(f"未找到 bid-design-writer Skill {source}文件：{path}")
     return path.read_text(encoding="utf-8")
+
+
+def load_skill_file(relative_path: str) -> str:
+    return _load_skill_file(str(resolve_skill_dir()), relative_path)
 
 
 def build_stage1_instructions() -> str:
@@ -42,14 +52,6 @@ def build_stage1_instructions() -> str:
 - 不要声称已经调用本地 Write 工具保存文件，后端会生成可下载成果。
 - 输出必须使用 Markdown。
 - 若文件信息缺失，标注“未提及”，不要猜测。
-"""
-
-
-def build_confirmation_instructions() -> str:
-    return """
-你是设计标书信息提取助手。用户会确认或修正上一轮招标文件提取结果。
-请根据用户反馈更新提取结果，保持原有 Markdown 结构，不要进入方案编写阶段。
-如果用户只是确认无误，简短回复“已确认”，无需重复完整提取结果。
 """
 
 

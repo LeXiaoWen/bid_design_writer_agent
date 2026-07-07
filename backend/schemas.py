@@ -1,16 +1,7 @@
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
-
-
-class ProjectStage(str, Enum):
-    INIT = "init"
-    UPLOADED = "uploaded"
-    CONFIRMING = "confirming"
-    TEMPLATE_SELECT = "template_select"
-    GENERATING = "generating"
-    DONE = "done"
+from pydantic import BaseModel, Field, field_validator
 
 
 class BidWorkflowStatus(str, Enum):
@@ -28,11 +19,6 @@ class ApiConfig(BaseModel):
     base_url: str = "https://api.openai.com/v1"
     api_key: str = Field(min_length=1)
     model: str = "gpt-4o"
-
-
-class Message(BaseModel):
-    role: str
-    content: str
 
 
 class ArtifactInfo(BaseModel):
@@ -58,13 +44,29 @@ class BidWorkflow(BaseModel):
     updated_at: str
 
 
-class BidWorkflowCreateResponse(BidWorkflow):
+class BidWorkflowPublic(BaseModel):
+    id: str
+    project_id: str
+    conversation_id: str
+    provider_profile_id: Optional[str] = None
+    file_name: str
+    extracted_markdown: str = ""
+    confirmation_text: str = ""
+    template_choice: Optional[str] = None
+    status: BidWorkflowStatus
+    error: Optional[str] = None
+    artifacts: List[ArtifactInfo] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+
+
+class BidWorkflowCreateResponse(BidWorkflowPublic):
     char_count: int = 0
     message: str = ""
 
 
 class BidWorkflowActionResponse(BaseModel):
-    workflow: BidWorkflow
+    workflow: BidWorkflowPublic
     message: str = ""
 
 
@@ -77,17 +79,6 @@ class BidWorkflowGenerateRequest(BaseModel):
     extra_context: Optional[str] = None
 
 
-class BehaviorReportEmail(BaseModel):
-    id: str
-    workflow_id: str
-    recipient: str
-    status: str
-    error: Optional[str] = None
-    zip_size: int = 0
-    created_at: str
-    sent_at: Optional[str] = None
-
-
 class AuthStatus(BaseModel):
     setup_required: bool
     authenticated: bool = False
@@ -98,10 +89,28 @@ class AuthSetupRequest(BaseModel):
     username: str = Field(min_length=1)
     password: str = Field(min_length=6)
 
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, value: str) -> str:
+        username = value.strip()
+        if not username:
+            raise ValueError("用户名不能为空。")
+        if len(username) > 64:
+            raise ValueError("用户名不能超过 64 个字符。")
+        return username
+
 
 class AuthLoginRequest(BaseModel):
     username: str = Field(min_length=1)
     password: str = Field(min_length=1)
+
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, value: str) -> str:
+        username = value.strip()
+        if not username:
+            raise ValueError("用户名不能为空。")
+        return username
 
 
 class AuthLoginResponse(BaseModel):
@@ -121,53 +130,6 @@ class AuthUser(BaseModel):
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(min_length=1)
     new_password: str = Field(min_length=6)
-
-
-class ProjectResponse(BaseModel):
-    project_id: str
-    stage: ProjectStage
-    messages: List[Message]
-    file_name: Optional[str] = None
-    skill_dir: str
-    extracted_markdown: str = ""
-    template_choice: str = ""
-    artifacts: List[ArtifactInfo] = []
-
-
-class UploadResponse(BaseModel):
-    project_id: str
-    stage: ProjectStage
-    file_name: str
-    char_count: int
-    message: str
-
-
-class ExtractRequest(BaseModel):
-    api_config: ApiConfig
-
-
-class ConfirmRequest(BaseModel):
-    text: str
-    api_config: Optional[ApiConfig] = None
-
-
-class GenerateRequest(BaseModel):
-    template_choice: str
-    api_config: ApiConfig
-
-
-class TextResponse(BaseModel):
-    project_id: str
-    stage: ProjectStage
-    message: str
-    extracted_markdown: str = ""
-    artifacts: Dict[str, str] = {}
-
-
-class Preset(BaseModel):
-    provider: str
-    base_url: str
-    model: str
 
 
 class WorkbenchProject(BaseModel):

@@ -15,13 +15,13 @@ os.environ["APP_AUTH_SECRET"] = "test-app-secret"
 
 from backend.main import app
 from backend.schemas import BidWorkflowStatus, ProviderModel
-from backend.services import behavior_report_email as behavior_report_email_service
-from backend.services.behavior_report_email import REPORT_FILENAME, send_behavior_report_email
+from backend.services.behavior_report import REPORT_FILENAME, behavior_report_path, save_behavior_report
 from backend.services.workbench_store import workbench_store
 
 
+APP_SECRET_HEADERS = {"X-App-Auth-Secret": "test-app-secret"}
 client = TestClient(app)
-auth_response = client.post("/api/v1/auth/setup", json={"username": "tester", "password": "test-password"})
+auth_response = client.post("/api/v1/auth/setup", headers=APP_SECRET_HEADERS, json={"username": "tester", "password": "test-password"})
 assert auth_response.status_code == 200
 client.headers.update(
     {
@@ -37,7 +37,6 @@ def test_health_identifies_ai_workbench_backend():
     payload = response.json()
     assert payload["ok"] is True
     assert payload["app"] == "ai-workbench-desktop"
-    assert payload["legacy_app"] == "bid-design-writer-desktop"
     assert "database" in payload
     assert "presets" in payload
 
@@ -50,10 +49,19 @@ def test_v1_routes_require_app_secret_and_login():
     no_token = bare_client.get("/api/v1/projects", headers={"X-App-Auth-Secret": "test-app-secret"})
     assert no_token.status_code == 401
 
-    status = bare_client.get("/api/v1/auth/status")
+    status_without_secret = bare_client.get("/api/v1/auth/status")
+    assert status_without_secret.status_code == 403
+
+    status = bare_client.get("/api/v1/auth/status", headers=APP_SECRET_HEADERS)
     assert status.status_code == 200
     assert status.json()["setup_required"] is False
     assert status.json()["authenticated"] is False
+
+
+def test_legacy_project_routes_are_removed():
+    bare_client = TestClient(app)
+    response = bare_client.post("/api/projects")
+    assert response.status_code == 404
 
 
 def test_local_frontend_cors_allows_dynamic_dev_ports():
@@ -107,55 +115,28 @@ def test_auth_login_logout_and_wrong_password_guard():
     assert after_logout.status_code == 401
 
 
-def test_create_project_and_missing_file_guard():
-    created = client.post("/api/projects")
-    assert created.status_code == 200
-    project_id = created.json()["project_id"]
+def test_auth_login_throttles_repeated_failures():
+    temporary_client = TestClient(app)
+    username = f"missing-{uuid4()}"
+    for _ in range(5):
+        response = temporary_client.post(
+            "/api/v1/auth/login",
+            headers=APP_SECRET_HEADERS,
+            json={"username": username, "password": "wrong-password"},
+        )
+        assert response.status_code == 401
 
-    fetched = client.get(f"/api/projects/{project_id}")
-    assert fetched.status_code == 200
-    assert fetched.json()["project_id"] == project_id
-
-    response = client.post(
-        f"/api/projects/{project_id}/extract",
-        json={
-            "api_config": {
-                "provider": "OpenAI",
-                "base_url": "https://api.openai.com/v1",
-                "api_key": "test",
-                "model": "gpt-4o",
-            }
-        },
+    throttled = temporary_client.post(
+        "/api/v1/auth/login",
+        headers=APP_SECRET_HEADERS,
+        json={"username": username, "password": "wrong-password"},
     )
-    assert response.status_code == 400
-    assert "请先上传" in response.json()["detail"]
+    assert throttled.status_code == 429
 
 
-def test_upload_txt_and_artifact_guard():
-    created = client.post("/api/projects")
-    project_id = created.json()["project_id"]
-
-    upload = client.post(
-        f"/api/projects/{project_id}/upload",
-        files={"file": ("招标.txt", "项目名称：测试项目".encode("utf-8"), "text/plain")},
-    )
-    assert upload.status_code == 200
-    assert upload.json()["stage"] == "uploaded"
-
-    artifacts = client.get(f"/api/projects/{project_id}/artifacts")
-    assert artifacts.status_code == 200
-    assert artifacts.json() == []
-
-    export = client.get(f"/api/projects/{project_id}/export.zip")
-    assert export.status_code == 404
-
-
-def test_confirm_before_extract_is_rejected():
-    created = client.post("/api/projects")
-    project_id = created.json()["project_id"]
-    response = client.post(f"/api/projects/{project_id}/confirm", json={"text": "确认"})
-    assert response.status_code == 400
-    assert "阶段一" in response.json()["detail"]
+def test_auth_rejects_blank_username():
+    response = client.post("/api/v1/auth/login", json={"username": "   ", "password": "wrong-password"})
+    assert response.status_code == 422
 
 
 def test_workbench_project_conversation_and_search():
@@ -322,9 +303,6 @@ def test_bid_workflow_store_persists_state_and_artifacts():
 
 
 def test_bid_workflow_v1_full_chain(monkeypatch):
-    for key in ("SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM", "SMTP_USE_TLS"):
-        monkeypatch.delenv(key, raising=False)
-
     created_project = client.post("/api/v1/projects", json={"title": "V1 标书项目"})
     project_id = created_project.json()["id"]
     created_conversation = client.post(
@@ -359,6 +337,7 @@ def test_bid_workflow_v1_full_chain(monkeypatch):
         files={"file": ("招标.txt", "项目名称：测试项目".encode("utf-8"), "text/plain")},
     )
     assert created.status_code == 200
+    assert "file_text" not in created.json()
     workflow_id = created.json()["id"]
     assert created.json()["status"] == "uploaded"
     assert created.json()["char_count"] > 0
@@ -374,6 +353,7 @@ def test_bid_workflow_v1_full_chain(monkeypatch):
     assert extract.status_code == 200
 
     workflow = client.get(f"/api/v1/bid-workflows/{workflow_id}").json()
+    assert "file_text" not in workflow
     assert workflow["status"] == "extraction_ready"
     assert "信息提取" in workflow["extracted_markdown"]
 
@@ -396,6 +376,7 @@ def test_bid_workflow_v1_full_chain(monkeypatch):
     listed = client.get("/api/v1/bid-workflows", params={"conversation_id": conversation_id})
     assert listed.status_code == 200
     assert listed.json()[0]["id"] == workflow_id
+    assert "file_text" not in listed.json()[0]
     assert len(listed.json()[0]["artifacts"]) == 4
 
     artifacts = client.get(f"/api/v1/bid-workflows/{workflow_id}/artifacts")
@@ -411,10 +392,11 @@ def test_bid_workflow_v1_full_chain(monkeypatch):
     with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
         assert proposal["name"] in archive.namelist()
 
-    email_status = client.get(f"/api/v1/bid-workflows/{workflow_id}/report-email-status")
-    assert email_status.status_code == 200
-    assert email_status.json()[0]["status"] == "not_configured"
-    assert "SMTP" in email_status.json()[0]["error"]
+    report_path = behavior_report_path(workflow_id)
+    assert report_path.exists()
+    report = report_path.read_text(encoding="utf-8")
+    assert "用户行为与需求摘要" in report
+    assert proposal["name"] in report
 
     search = client.get("/api/v1/search", params={"q": "信息提取"})
     assert search.status_code == 200
@@ -422,15 +404,15 @@ def test_bid_workflow_v1_full_chain(monkeypatch):
 
 
 def _create_completed_bid_workflow() -> str:
-    created_project = client.post("/api/v1/projects", json={"title": "邮件报告项目"})
+    created_project = client.post("/api/v1/projects", json={"title": "行为摘要项目"})
     project_id = created_project.json()["id"]
-    created_conversation = client.post("/api/v1/conversations", json={"project_id": project_id, "title": "邮件报告对话"})
+    created_conversation = client.post("/api/v1/conversations", json={"project_id": project_id, "title": "行为摘要对话"})
     conversation_id = created_conversation.json()["id"]
     created_profile = client.post(
         "/api/v1/provider-profiles",
         json={
             "provider": "OpenAI",
-            "display_name": "OpenAI 邮件报告",
+            "display_name": "OpenAI 行为摘要",
             "base_url": "https://api.openai.com/v1",
             "model": "gpt-4o",
             "api_key": "secret",
@@ -439,121 +421,37 @@ def _create_completed_bid_workflow() -> str:
     workflow = workbench_store.create_bid_workflow(
         conversation_id=conversation_id,
         provider_profile_id=created_profile.json()["id"],
-        file_name="邮件招标文件.txt",
-        file_text="原始招标文件全文不应进入行为报告。项目名称：邮件测试项目。",
+        file_name="行为摘要招标文件.txt",
+        file_text="原始招标文件全文不应进入行为报告。项目名称：行为摘要测试项目。",
     )
     workbench_store.add_message(conversation_id, "user", "请补充低碳策略，api_key=sk-1234567890abcdef")
-    workbench_store.save_bid_extraction(workflow.id, "# 邮件测试项目 — 招标文件信息提取")
+    workbench_store.save_bid_extraction(workflow.id, "# 行为摘要测试项目 — 招标文件信息提取")
     workbench_store.save_bid_confirmation(workflow.id, "确认，并补充低碳策略。token=sk-1234567890abcdef")
     workbench_store.save_bid_template_choice(workflow.id, "auto")
     workbench_store.save_bid_artifacts(
         workflow.id,
         {
-            "邮件测试项目_招标文件信息提取.md": "# 信息提取",
-            "邮件测试项目_设计方案.md": "# 设计方案",
+            "行为摘要测试项目_招标文件信息提取.md": "# 信息提取",
+            "行为摘要测试项目_设计方案.md": "# 设计方案",
         },
     )
     return workflow.id
 
 
-def test_behavior_report_email_sends_zip_and_is_idempotent(monkeypatch):
-    sent_messages = []
-
-    class FakeSmtp:
-        def __init__(self, host, port, timeout=None):
-            assert host == "smtp.example.com"
-            assert port == 587
-            assert timeout == 20
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def starttls(self):
-            return None
-
-        def login(self, user, password):
-            assert user == "sender@example.com"
-            assert password == "auth-code"
-
-        def send_message(self, message):
-            sent_messages.append(message)
-
-    monkeypatch.setenv("SMTP_HOST", "smtp.example.com")
-    monkeypatch.setenv("SMTP_PORT", "587")
-    monkeypatch.setenv("SMTP_USER", "sender@example.com")
-    monkeypatch.setenv("SMTP_PASSWORD", "auth-code")
-    monkeypatch.setenv("SMTP_FROM", "sender@example.com")
-    monkeypatch.setenv("SMTP_USE_TLS", "true")
-    monkeypatch.setenv("BEHAVIOR_REPORT_RECIPIENTS", "ops@example.com")
-    monkeypatch.setattr(behavior_report_email_service.smtplib, "SMTP", FakeSmtp)
-
+def test_behavior_report_saves_markdown_locally_and_redacts_sensitive():
     workflow_id = _create_completed_bid_workflow()
-    records = send_behavior_report_email(workflow_id)
+    path = save_behavior_report(workflow_id)
+    duplicate = save_behavior_report(workflow_id)
 
-    assert records[0].status == "sent"
-    assert records[0].recipient == "ops@example.com"
-    assert records[0].zip_size > 0
-    assert len(sent_messages) == 1
-    assert sent_messages[0]["To"] == "ops@example.com"
-    assert sent_messages[0]["Subject"].startswith("标书方案助手行为摘要 - 邮件招标文件.txt - ")
-
-    attachment = list(sent_messages[0].iter_attachments())[0]
-    assert attachment.get_filename().startswith(f"行为摘要与标书成果_{workflow_id[:8]}")
-    with zipfile.ZipFile(io.BytesIO(attachment.get_payload(decode=True))) as archive:
-        names = archive.namelist()
-        report = archive.read(REPORT_FILENAME).decode("utf-8")
-        assert REPORT_FILENAME in names
-        assert "邮件测试项目_设计方案.md" in names
-        assert "用户行为与需求摘要" in report
-        assert "原始招标文件全文不应进入行为报告" not in report
-        assert "sk-1234567890abcdef" not in report
-        assert "已脱敏" in report
-
-    duplicate = send_behavior_report_email(workflow_id)
-    assert duplicate[0].status == "sent"
-    assert len(sent_messages) == 1
-
-
-def test_behavior_report_email_rejects_oversized_zip(monkeypatch):
-    sent_messages = []
-
-    class FakeSmtp:
-        def __init__(self, *args, **kwargs):
-            return None
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def starttls(self):
-            return None
-
-        def login(self, user, password):
-            return None
-
-        def send_message(self, message):
-            sent_messages.append(message)
-
-    monkeypatch.setenv("SMTP_HOST", "smtp.example.com")
-    monkeypatch.setenv("SMTP_PORT", "587")
-    monkeypatch.setenv("SMTP_USER", "sender@example.com")
-    monkeypatch.setenv("SMTP_PASSWORD", "auth-code")
-    monkeypatch.setenv("SMTP_FROM", "sender@example.com")
-    monkeypatch.setenv("SMTP_USE_TLS", "true")
-    monkeypatch.setenv("BEHAVIOR_REPORT_RECIPIENTS", "ops@example.com")
-    monkeypatch.setattr(behavior_report_email_service.smtplib, "SMTP", FakeSmtp)
-    monkeypatch.setattr(behavior_report_email_service, "MAX_ATTACHMENT_BYTES", 16)
-
-    records = send_behavior_report_email(_create_completed_bid_workflow())
-
-    assert records[0].status == "failed"
-    assert "附件过大" in records[0].error
-    assert sent_messages == []
+    assert path == duplicate
+    assert path.name == REPORT_FILENAME
+    assert path.parent.name == workflow_id
+    report = path.read_text(encoding="utf-8")
+    assert "用户行为与需求摘要" in report
+    assert "行为摘要测试项目_设计方案.md" in report
+    assert "原始招标文件全文不应进入行为报告" not in report
+    assert "sk-1234567890abcdef" not in report
+    assert "已脱敏" in report
 
 
 def test_bid_workflow_cancel_prevents_late_extraction_save(monkeypatch):
@@ -608,7 +506,7 @@ def test_bid_workflow_cancel_prevents_late_generation_save(monkeypatch):
     run_bid_generation_task(workflow_id)
     cancelled = workbench_store.get_bid_workflow(workflow_id)
     assert cancelled.status == BidWorkflowStatus.CANCELLED
-    assert workbench_store.get_bid_artifact_content(workflow_id, "邮件测试项目_设计方案.md") == "# 设计方案"
+    assert workbench_store.get_bid_artifact_content(workflow_id, "行为摘要测试项目_设计方案.md") == "# 设计方案"
 
 
 def test_bid_workflow_cancel_endpoint_rejects_completed_workflow():
@@ -616,6 +514,28 @@ def test_bid_workflow_cancel_endpoint_rejects_completed_workflow():
     response = client.post(f"/api/v1/bid-workflows/{workflow_id}/cancel")
     assert response.status_code == 400
     assert "已完成" in response.json()["detail"]
+
+
+def test_bid_generation_behavior_report_failure_does_not_fail_workflow(monkeypatch):
+    workflow_id = _create_completed_bid_workflow()
+    workbench_store.update_bid_workflow_status(workflow_id, BidWorkflowStatus.GENERATING)
+
+    def fake_run_agent(api_config, instructions, prompt):
+        return "## 方案正文\n内容"
+
+    def fake_save_behavior_report(workflow_id_arg: str):
+        assert workflow_id_arg == workflow_id
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr("backend.main.run_agent", fake_run_agent)
+    monkeypatch.setattr("backend.main.save_behavior_report", fake_save_behavior_report)
+
+    from backend.main import run_bid_generation_task
+
+    run_bid_generation_task(workflow_id)
+    completed = workbench_store.get_bid_workflow(workflow_id)
+    assert completed.status == BidWorkflowStatus.COMPLETED
+    assert completed.error is None
 
 
 def test_bid_workflow_v1_rejects_parse_error_and_missing_key():
@@ -660,3 +580,30 @@ def test_bid_workflow_v1_rejects_parse_error_and_missing_key():
     )
     assert parse_error.status_code == 400
     assert "仅支持" in parse_error.json()["detail"]
+
+
+def test_bid_workflow_upload_rejects_oversized_file(monkeypatch):
+    monkeypatch.setattr("backend.main.MAX_UPLOAD_BYTES", 8)
+    created_project = client.post("/api/v1/projects", json={"title": "大文件项目"})
+    project_id = created_project.json()["id"]
+    created_conversation = client.post("/api/v1/conversations", json={"project_id": project_id, "title": "大文件"})
+    conversation_id = created_conversation.json()["id"]
+    created_profile = client.post(
+        "/api/v1/provider-profiles",
+        json={
+            "provider": "OpenAI",
+            "display_name": "OpenAI 大文件",
+            "base_url": "https://api.openai.com/v1",
+            "model": "gpt-4o",
+            "api_key": "secret",
+        },
+    )
+
+    response = client.post(
+        "/api/v1/bid-workflows",
+        data={"conversation_id": conversation_id, "provider_profile_id": created_profile.json()["id"]},
+        files={"file": ("big.txt", b"0123456789", "text/plain")},
+    )
+
+    assert response.status_code == 400
+    assert "上传文件不能超过" in response.json()["detail"]

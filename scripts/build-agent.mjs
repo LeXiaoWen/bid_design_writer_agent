@@ -14,8 +14,9 @@ function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: projectRoot,
     stdio: "inherit",
-    // Windows 上 .cmd/.bat 文件需要 shell 才能正确执行
-    shell: process.platform === "win32",
+    // 所有命令均为 Python 可执行文件（.exe 或 py/python 命令名），无需 shell
+    shell: false,
+    windowsHide: true,
     ...options,
   });
 

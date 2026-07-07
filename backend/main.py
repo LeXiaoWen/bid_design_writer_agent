@@ -14,47 +14,41 @@ from .schemas import (
     AuthSetupRequest,
     AuthStatus,
     AuthUser,
-    BehaviorReportEmail,
     BidWorkflow,
     BidWorkflowActionResponse,
     BidWorkflowConfirmRequest,
     BidWorkflowCreateResponse,
     BidWorkflowGenerateRequest,
+    BidWorkflowPublic,
     BidWorkflowStatus,
     ChangePasswordRequest,
     ChatStreamRequest,
-    ConfirmRequest,
-    ExtractRequest,
-    GenerateRequest,
     ProviderModelsResponse,
     ProviderProfileCreate,
     ProviderProfileUpdate,
-    ProjectStage,
-    TextResponse,
-    UploadResponse,
     WorkbenchConversationCreate,
     WorkbenchConversationUpdate,
     WorkbenchProjectCreate,
     WorkbenchProjectUpdate,
 )
-from .services.artifacts import build_output_files, list_artifacts, make_zip
-from .services.auth import change_password, login_user, logout_token, setup_user, user_from_token
-from .services.behavior_report_email import send_behavior_report_email
+from .services.artifacts import build_output_files, make_zip
+from .services.auth import AuthRateLimitError, change_password, login_user, logout_token, setup_user, user_from_token
+from .services.behavior_report import save_behavior_report
 from .services.config import API_PRESETS
 from .services.document_parser import parse_document
 from .services.llm import run_agent
-from .services.project_store import store
 from .services.provider_models import list_provider_models as fetch_provider_models
 from .services.skill_loader import (
-    build_confirmation_instructions,
     build_stage1_instructions,
     build_stage2_instructions,
-    resolve_skill_dir,
+    skill_source_label,
 )
 from .services.workbench_llm import cancel_run, stream_chat
 from .services.workbench_store import db_path, workbench_store
 
 load_dotenv()
+
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
 
 def get_cors_origins() -> list[str]:
@@ -103,11 +97,15 @@ async def require_local_auth(request: Request, call_next):
     path = request.url.path
     if request.method == "OPTIONS":
         return await call_next(request)
-    if not path.startswith("/api/v1/") or path in PUBLIC_API_V1_PATHS:
+    protected_path = path.startswith("/api/v1/")
+    if not protected_path:
         return await call_next(request)
 
     if not app_auth_secret_is_valid(request):
         return JSONResponse(status_code=403, content={"detail": "本机访问密钥无效。"})
+
+    if path in PUBLIC_API_V1_PATHS:
+        return await call_next(request)
 
     user = user_from_token(bearer_token(request))
     if user is None:
@@ -123,25 +121,25 @@ def current_user(request: Request) -> AuthUser:
     return user
 
 
-def get_project_or_404(project_id: str):
-    try:
-        return store.get(project_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="项目不存在。") from exc
+async def read_upload_with_limit(file: UploadFile, max_bytes: int | None = None) -> bytes:
+    limit = max_bytes or MAX_UPLOAD_BYTES
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise ValueError(f"上传文件不能超过 {limit // (1024 * 1024)}MB。")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def truncate_text(text: str, max_chars: int = 120_000) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + "\n\n[文本过长，已截断。请优先基于已有内容提取，并提示用户可补充缺失页。]"
-
-
-def is_confirmation(text: str) -> bool:
-    normalized = text.strip().lower()
-    if normalized.startswith(("不确认", "未确认", "不能确认")):
-        return False
-    exact_matches = {"确认", "确认无误", "无误", "正确", "没问题", "可以", "ok", "yes", "y"}
-    return normalized in exact_matches or normalized.startswith(("确认无误", "信息无误"))
 
 
 def api_config_from_profile(provider_profile_id: str) -> ApiConfig:
@@ -156,6 +154,10 @@ def template_display_name(template_choice: str) -> str:
     if template_choice == "auto":
         return "按招标文件自动判断目录结构"
     return "12 章设计标模板" if template_choice == "12-chapter" else "5 章全过程咨询标模板"
+
+
+def public_bid_workflow(workflow: BidWorkflow) -> BidWorkflowPublic:
+    return BidWorkflowPublic.model_validate(workflow.model_dump(exclude={"file_text"}))
 
 
 def workflow_is_cancelled(workflow_id: str) -> bool:
@@ -219,7 +221,10 @@ def run_bid_generation_task(workflow_id: str) -> None:
         files = build_output_files(workflow.extracted_markdown, result)
         workbench_store.save_bid_artifacts(workflow_id, files)
         completed = workbench_store.get_bid_workflow(workflow_id)
-        send_behavior_report_email(completed.id)
+        try:
+            save_behavior_report(completed.id)
+        except Exception as report_exc:
+            print(f"[behavior-report] failed to save report for {completed.id}: {report_exc}")
         workbench_store.add_message(completed.conversation_id, "assistant", f"{result}\n\n生成完成，可下载 Markdown 文件或 ZIP 包。")
     except Exception as exc:
         failed = workbench_store.update_bid_workflow_status(workflow_id, BidWorkflowStatus.FAILED, error=str(exc))
@@ -231,9 +236,8 @@ def health():
     return {
         "ok": True,
         "app": "ai-workbench-desktop",
-        "legacy_app": "bid-design-writer-desktop",
         "version": "0.1.0",
-        "skill_dir": str(resolve_skill_dir()),
+        "skill_dir": skill_source_label(),
         "database": str(db_path()),
         "presets": API_PRESETS,
     }
@@ -265,6 +269,8 @@ def setup_auth(request: AuthSetupRequest):
 def login_auth(request: AuthLoginRequest):
     try:
         return login_user(request.username, request.password)
+    except AuthRateLimitError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
@@ -440,9 +446,9 @@ async def create_bid_workflow(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    content = await file.read()
     file_name = file.filename or "uploaded"
     try:
+        content = await read_upload_with_limit(file)
         file_text = parse_document(file_name, content)
         workflow = workbench_store.create_bid_workflow(conversation_id, file_name, file_text, provider_profile_id)
     except ValueError as exc:
@@ -452,18 +458,18 @@ async def create_bid_workflow(
 
     workbench_store.add_message(conversation_id, "user", f"已上传招标文件：{file_name}")
     workbench_store.add_message(conversation_id, "assistant", "文件已解析。可以开始阶段一信息提取。")
-    return BidWorkflowCreateResponse(**workflow.model_dump(), char_count=len(file_text), message="文件解析完成。")
+    return BidWorkflowCreateResponse(**workflow.model_dump(exclude={"file_text"}), char_count=len(file_text), message="文件解析完成。")
 
 
-@app.get("/api/v1/bid-workflows", response_model=list[BidWorkflow])
+@app.get("/api/v1/bid-workflows", response_model=list[BidWorkflowPublic])
 def list_bid_workflows(conversation_id: str | None = Query(default=None)):
-    return workbench_store.list_bid_workflows(conversation_id)
+    return [public_bid_workflow(workflow) for workflow in workbench_store.list_bid_workflows(conversation_id)]
 
 
-@app.get("/api/v1/bid-workflows/{workflow_id}")
+@app.get("/api/v1/bid-workflows/{workflow_id}", response_model=BidWorkflowPublic)
 def get_bid_workflow(workflow_id: str):
     try:
-        return workbench_store.get_bid_workflow(workflow_id)
+        return public_bid_workflow(workbench_store.get_bid_workflow(workflow_id))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="标书工作流不存在。") from exc
 
@@ -485,7 +491,7 @@ def extract_bid_workflow(workflow_id: str, background_tasks: BackgroundTasks):
 
     workbench_store.add_message(workflow.conversation_id, "assistant", "正在执行阶段一信息提取。")
     background_tasks.add_task(run_bid_extraction_task, workflow_id)
-    return BidWorkflowActionResponse(workflow=workflow, message="阶段一信息提取已开始。")
+    return BidWorkflowActionResponse(workflow=public_bid_workflow(workflow), message="阶段一信息提取已开始。")
 
 
 @app.post("/api/v1/bid-workflows/{workflow_id}/confirm", response_model=BidWorkflowActionResponse)
@@ -503,7 +509,7 @@ def confirm_bid_workflow(workflow_id: str, request: BidWorkflowConfirmRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     workbench_store.add_message(workflow.conversation_id, "user", request.text)
-    return BidWorkflowActionResponse(workflow=workflow, message="阶段一信息已确认。")
+    return BidWorkflowActionResponse(workflow=public_bid_workflow(workflow), message="阶段一信息已确认。")
 
 
 @app.post("/api/v1/bid-workflows/{workflow_id}/generate", response_model=BidWorkflowActionResponse)
@@ -532,7 +538,7 @@ def generate_bid_workflow(workflow_id: str, request: BidWorkflowGenerateRequest,
 
     workbench_store.add_message(workflow.conversation_id, "assistant", f"正在执行阶段二设计方案生成，模板：{template_display_name(request.template_choice)}。")
     background_tasks.add_task(run_bid_generation_task, workflow_id)
-    return BidWorkflowActionResponse(workflow=workflow, message="阶段二设计方案生成已开始。")
+    return BidWorkflowActionResponse(workflow=public_bid_workflow(workflow), message="阶段二设计方案生成已开始。")
 
 
 @app.post("/api/v1/bid-workflows/{workflow_id}/cancel", response_model=BidWorkflowActionResponse)
@@ -542,7 +548,7 @@ def cancel_bid_workflow(workflow_id: str):
         if workflow.status == BidWorkflowStatus.COMPLETED:
             raise ValueError("当前工作流已完成，不能取消。")
         if workflow.status == BidWorkflowStatus.CANCELLED:
-            return BidWorkflowActionResponse(workflow=workflow, message="标书工作流已取消。")
+            return BidWorkflowActionResponse(workflow=public_bid_workflow(workflow), message="标书工作流已取消。")
         workflow = workbench_store.update_bid_workflow_status(workflow_id, BidWorkflowStatus.CANCELLED)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="标书工作流不存在。") from exc
@@ -550,24 +556,7 @@ def cancel_bid_workflow(workflow_id: str):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     workbench_store.add_message(workflow.conversation_id, "assistant", "当前标书流程已取消。")
-    return BidWorkflowActionResponse(workflow=workflow, message="标书工作流已取消。")
-
-
-@app.get("/api/v1/bid-workflows/{workflow_id}/report-email-status", response_model=list[BehaviorReportEmail])
-def get_bid_workflow_report_email_status(workflow_id: str):
-    try:
-        return workbench_store.list_behavior_report_emails(workflow_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="标书工作流不存在。") from exc
-
-
-@app.post("/api/v1/bid-workflows/{workflow_id}/report-email/retry", response_model=list[BehaviorReportEmail])
-def retry_bid_workflow_report_email(workflow_id: str):
-    try:
-        workbench_store.get_bid_workflow(workflow_id)
-        return send_behavior_report_email(workflow_id, allow_retry=True)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="标书工作流不存在。") from exc
+    return BidWorkflowActionResponse(workflow=public_bid_workflow(workflow), message="标书工作流已取消。")
 
 
 @app.get("/api/v1/bid-workflows/{workflow_id}/artifacts")
@@ -604,173 +593,4 @@ def export_bid_workflow_zip(workflow_id: str):
         make_zip(files),
         media_type="application/zip",
         headers={"Content-Disposition": "attachment; filename*=UTF-8''bid-workflow-artifacts.zip"},
-    )
-
-
-@app.post("/api/projects")
-def create_project():
-    project = store.create()
-    return store.to_response(project)
-
-
-@app.get("/api/projects/{project_id}")
-def get_project(project_id: str):
-    return store.to_response(get_project_or_404(project_id))
-
-
-@app.post("/api/projects/{project_id}/upload", response_model=UploadResponse)
-async def upload_file(project_id: str, file: UploadFile = File(...)):
-    project = get_project_or_404(project_id)
-    content = await file.read()
-    try:
-        file_text = parse_document(file.filename or "uploaded", content)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    project.file_name = file.filename
-    project.file_text = file_text
-    project.extracted_markdown = ""
-    project.template_choice = ""
-    project.artifacts = {}
-    project.stage = ProjectStage.UPLOADED
-    project.add_message("user", f"已上传招标文件：{file.filename}")
-    project.add_message("assistant", "文件已解析。点击“开始提取”执行阶段一信息提取。")
-    return UploadResponse(
-        project_id=project.project_id,
-        stage=project.stage,
-        file_name=file.filename or "uploaded",
-        char_count=len(file_text),
-        message="文件解析完成。",
-    )
-
-
-@app.post("/api/projects/{project_id}/extract", response_model=TextResponse)
-def extract_project(project_id: str, request: ExtractRequest):
-    project = get_project_or_404(project_id)
-    if not project.file_text:
-        raise HTTPException(status_code=400, detail="请先上传招标文件。")
-
-    prompt = f"""
-请执行阶段一：从以下招标文件文本中提取四类关键信息，并按 Skill 要求输出。
-
-文件名：{project.file_name}
-提取时间：{datetime.now().strftime("%Y-%m-%d %H:%M")}
-
-招标文件文本：
-{truncate_text(project.file_text)}
-"""
-    project.stage = ProjectStage.CONFIRMING
-    try:
-        result = run_agent(request.api_config, build_stage1_instructions(), prompt)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"阶段一提取失败：{exc}") from exc
-
-    project.extracted_markdown = result
-    project.add_message("assistant", f"{result}\n\n请确认以上信息是否准确。你可以直接回复“确认”，也可以指出需要修正的内容。")
-    return TextResponse(project_id=project.project_id, stage=project.stage, message=result, extracted_markdown=result)
-
-
-@app.post("/api/projects/{project_id}/confirm", response_model=TextResponse)
-def confirm_project(project_id: str, request: ConfirmRequest):
-    project = get_project_or_404(project_id)
-    if not project.extracted_markdown:
-        raise HTTPException(status_code=400, detail="请先完成阶段一信息提取。")
-
-    project.add_message("user", request.text)
-    if is_confirmation(request.text):
-        project.stage = ProjectStage.TEMPLATE_SELECT
-        message = "已确认阶段一信息。请选择标书模板：A. 12 章设计标模板，或 B. 5 章全过程咨询标模板。"
-        project.add_message("assistant", message)
-        return TextResponse(
-            project_id=project.project_id,
-            stage=project.stage,
-            message=message,
-            extracted_markdown=project.extracted_markdown,
-        )
-
-    if request.api_config is None:
-        raise HTTPException(status_code=400, detail="修正阶段一结果需要提供 API 配置。")
-
-    prompt = f"""
-这是当前提取结果：
-
-{project.extracted_markdown}
-
-用户修正/补充：
-{request.text}
-
-请输出更新后的完整阶段一提取结果。
-"""
-    try:
-        result = run_agent(request.api_config, build_confirmation_instructions(), prompt)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"阶段一结果更新失败：{exc}") from exc
-
-    project.extracted_markdown = result
-    project.stage = ProjectStage.CONFIRMING
-    project.add_message("assistant", f"{result}\n\n请继续确认。确认无误后回复“确认”。")
-    return TextResponse(project_id=project.project_id, stage=project.stage, message=result, extracted_markdown=result)
-
-
-@app.post("/api/projects/{project_id}/generate", response_model=TextResponse)
-def generate_project(project_id: str, request: GenerateRequest):
-    project = get_project_or_404(project_id)
-    if not project.extracted_markdown:
-        raise HTTPException(status_code=400, detail="请先完成阶段一信息提取。")
-    if project.stage != ProjectStage.TEMPLATE_SELECT:
-        raise HTTPException(status_code=400, detail="请先确认阶段一信息后再生成方案。")
-    if request.template_choice not in {"12-chapter", "5-chapter"}:
-        raise HTTPException(status_code=400, detail="模板选择无效，请使用 12-chapter 或 5-chapter。")
-
-    project.stage = ProjectStage.GENERATING
-    project.template_choice = request.template_choice
-    template_name = "12 章设计标模板" if request.template_choice == "12-chapter" else "5 章全过程咨询标模板"
-    prompt = f"""
-用户已确认阶段一提取结果，并选择：{template_name}
-
-阶段一提取结果：
-{project.extracted_markdown}
-
-请执行阶段二：生成完整设计方案、绘图提示词 + 专业图纸需求清单、标书制作规范汇总。
-"""
-    try:
-        result = run_agent(request.api_config, build_stage2_instructions(request.template_choice), prompt)
-    except Exception as exc:
-        project.stage = ProjectStage.TEMPLATE_SELECT
-        raise HTTPException(status_code=502, detail=f"阶段二生成失败：{exc}") from exc
-
-    project.artifacts = build_output_files(project.extracted_markdown, result)
-    project.stage = ProjectStage.DONE
-    project.add_message("assistant", f"{result}\n\n生成完成。左侧已提供 Markdown 和 ZIP 下载。")
-    return TextResponse(project_id=project.project_id, stage=project.stage, message=result, artifacts=project.artifacts)
-
-
-@app.get("/api/projects/{project_id}/artifacts")
-def artifacts(project_id: str):
-    project = get_project_or_404(project_id)
-    return list_artifacts(project.artifacts)
-
-
-@app.get("/api/projects/{project_id}/artifacts/{name}")
-def artifact(project_id: str, name: str):
-    project = get_project_or_404(project_id)
-    decoded = unquote(name)
-    if decoded not in project.artifacts:
-        raise HTTPException(status_code=404, detail="成果文件不存在。")
-    return Response(
-        project.artifacts[decoded],
-        media_type="text/markdown; charset=utf-8",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(decoded)}"},
-    )
-
-
-@app.get("/api/projects/{project_id}/export.zip")
-def export_zip(project_id: str):
-    project = get_project_or_404(project_id)
-    if not project.artifacts:
-        raise HTTPException(status_code=404, detail="暂无可导出的成果文件。")
-    return Response(
-        make_zip(project.artifacts),
-        media_type="application/zip",
-        headers={"Content-Disposition": "attachment; filename*=UTF-8''bid-design-writer-artifacts.zip"},
     )

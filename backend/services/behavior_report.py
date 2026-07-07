@@ -1,74 +1,24 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
-from email.message import EmailMessage
-import os
 import re
-import smtplib
+from pathlib import Path
 from typing import Iterable
 
-from ..schemas import BehaviorReportEmail, BidWorkflow, WorkbenchMessage
-from .artifacts import make_zip
-from .workbench_store import utc_now, workbench_store
+from ..schemas import BidWorkflow, WorkbenchMessage
+from .workbench_store import data_dir, workbench_store
 
 
-DEFAULT_RECIPIENT = "le263687605@163.com"
 REPORT_FILENAME = "用户行为与需求摘要.md"
-MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
 
-@dataclass(frozen=True)
-class SmtpConfig:
-    host: str
-    port: int
-    user: str
-    password: str
-    sender: str
-    use_tls: bool
+def behavior_report_root() -> Path:
+    root = data_dir() / "behavior_reports"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
-def get_report_recipients() -> list[str]:
-    raw = os.getenv("BEHAVIOR_REPORT_RECIPIENTS", DEFAULT_RECIPIENT)
-    recipients = [item.strip() for item in raw.split(",") if item.strip()]
-    return recipients or [DEFAULT_RECIPIENT]
-
-
-def get_smtp_config() -> tuple[SmtpConfig | None, str | None]:
-    host = os.getenv("SMTP_HOST", "").strip()
-    port_raw = os.getenv("SMTP_PORT", "").strip()
-    user = os.getenv("SMTP_USER", "").strip()
-    password = os.getenv("SMTP_PASSWORD", "").strip()
-    sender = os.getenv("SMTP_FROM", "").strip()
-    use_tls_raw = os.getenv("SMTP_USE_TLS", "true").strip().lower()
-
-    missing = [
-        name
-        for name, value in {
-            "SMTP_HOST": host,
-            "SMTP_PORT": port_raw,
-            "SMTP_USER": user,
-            "SMTP_PASSWORD": password,
-            "SMTP_FROM": sender,
-        }.items()
-        if not value
-    ]
-    if missing:
-        return None, f"缺少 SMTP 配置：{', '.join(missing)}"
-
-    try:
-        port = int(port_raw)
-    except ValueError:
-        return None, "SMTP_PORT 必须是数字。"
-
-    return SmtpConfig(
-        host=host,
-        port=port,
-        user=user,
-        password=password,
-        sender=sender,
-        use_tls=use_tls_raw not in {"0", "false", "no", "off"},
-    ), None
+def behavior_report_path(workflow_id: str) -> Path:
+    return behavior_report_root() / workflow_id / REPORT_FILENAME
 
 
 def redact_sensitive(text: str) -> str:
@@ -185,7 +135,7 @@ def build_behavior_report(
             _bullet_lines(
                 [
                     "模板选择应基于招标文件实际章节、评分点和成果要求自动推断。",
-                    "阶段二完成后应稳定展示下载入口和发送状态，不阻塞用户继续下载。",
+                    "阶段二完成后应稳定展示下载入口，不阻塞用户继续下载。",
                     "后续可加入 LLM 摘要，但必须保留规则模板作为 fallback。",
                 ]
             ),
@@ -193,81 +143,19 @@ def build_behavior_report(
             "## 七、关键短片段",
             _bullet_lines(snippet_lines, "暂无可摘录的用户短片段。"),
             "",
-            "## 八、本次打包成果",
+            "## 八、本次生成成果",
             _bullet_lines(artifact_lines, "暂无生成成果文件。"),
             "",
         ]
     )
 
 
-def build_report_zip(workflow: BidWorkflow) -> bytes:
+def save_behavior_report(workflow_id: str) -> Path:
+    workflow = workbench_store.get_bid_workflow(workflow_id)
     artifact_files = workbench_store.get_bid_artifact_files(workflow.id)
     messages = workbench_store.list_messages(workflow.conversation_id)
     report = build_behavior_report(workflow, messages, artifact_files)
-    files = {REPORT_FILENAME: report, **artifact_files}
-    return make_zip(files)
-
-
-def _send_email(config: SmtpConfig, recipient: str, subject: str, attachment_name: str, attachment: bytes) -> None:
-    message = EmailMessage()
-    message["From"] = config.sender
-    message["To"] = recipient
-    message["Subject"] = subject
-    message.set_content("标书方案助手已自动生成行为摘要与本次 Markdown 成果包，用于后续优化工作流程。")
-    message.add_attachment(attachment, maintype="application", subtype="zip", filename=attachment_name)
-
-    smtp_cls = smtplib.SMTP_SSL if config.use_tls and config.port == 465 else smtplib.SMTP
-    with smtp_cls(config.host, config.port, timeout=20) as smtp:
-        if config.use_tls and config.port != 465:
-            smtp.starttls()
-        smtp.login(config.user, config.password)
-        smtp.send_message(message)
-
-
-def send_behavior_report_email(workflow_id: str, allow_retry: bool = False) -> list[BehaviorReportEmail]:
-    workflow = workbench_store.get_bid_workflow(workflow_id)
-    sent_at = datetime.now().strftime("%Y-%m-%d %H:%M")
-    subject = f"标书方案助手行为摘要 - {workflow.file_name} - {sent_at}"
-    attachment_name = f"行为摘要与标书成果_{workflow.id[:8]}.zip"
-    results: list[BehaviorReportEmail] = []
-
-    for recipient in get_report_recipients():
-        existing = workbench_store.get_behavior_report_email(workflow.id, recipient)
-        if existing and not allow_retry:
-            results.append(existing)
-            continue
-        if existing and existing.status == "sent":
-            results.append(existing)
-            continue
-
-        record = existing or workbench_store.create_behavior_report_email(workflow.id, recipient)
-        config, config_error = get_smtp_config()
-        if not config:
-            results.append(workbench_store.update_behavior_report_email(record.id, "not_configured", error=config_error))
-            continue
-
-        zip_bytes = b""
-        try:
-            zip_bytes = build_report_zip(workflow)
-            if len(zip_bytes) > MAX_ATTACHMENT_BYTES:
-                raise ValueError(f"附件过大：{len(zip_bytes)} bytes，超过 20MB 上限。")
-            _send_email(config, recipient, subject, attachment_name, zip_bytes)
-            results.append(
-                workbench_store.update_behavior_report_email(
-                    record.id,
-                    "sent",
-                    zip_size=len(zip_bytes),
-                    sent_at=utc_now(),
-                )
-            )
-        except Exception as exc:
-            results.append(
-                workbench_store.update_behavior_report_email(
-                    record.id,
-                    "failed",
-                    error=str(exc),
-                    zip_size=len(zip_bytes),
-                )
-            )
-
-    return results
+    path = behavior_report_path(workflow.id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(report, encoding="utf-8")
+    return path

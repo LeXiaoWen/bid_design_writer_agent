@@ -8,6 +8,7 @@ from backend.schemas import ApiConfig
 from backend.services.artifacts import build_output_files, extract_section, infer_project_name, make_zip
 from backend.services.document_parser import parse_document
 from backend.services.llm import create_agent
+from backend.services.skill_loader import build_stage1_instructions, build_stage2_instructions, skill_source_label
 
 
 def make_docx_bytes(text: str) -> bytes:
@@ -91,3 +92,47 @@ def test_openai_compatible_agent_accepts_base_url():
     )
     assert agent is not None
     assert agent.model.role_map["system"] == "system"
+
+
+def write_test_skill(root):
+    references = root / "references"
+    references.mkdir()
+    (root / "SKILL.md").write_text("# 外部测试 Skill\n", encoding="utf-8")
+    (references / "extraction-checklist.md").write_text("外部阶段一清单", encoding="utf-8")
+    (references / "proposal-format.md").write_text("外部格式规范", encoding="utf-8")
+    (references / "设计标书大纲模板参考.md").write_text("外部 12 章模板", encoding="utf-8")
+    (references / "设计标书大纲模板参考-全过程咨询标.md").write_text("外部 5 章模板", encoding="utf-8")
+
+
+def test_skill_loader_uses_bundled_skill_by_default(monkeypatch):
+    monkeypatch.delenv("BID_DESIGN_WRITER_SKILL_DIR", raising=False)
+
+    assert skill_source_label() == "bundled:bid_design_writer"
+    instructions = build_stage1_instructions()
+    assert "招标设计方案编写助手" in instructions
+    assert "阶段一补充提取清单" in instructions
+
+
+def test_skill_loader_accepts_explicit_external_override(tmp_path, monkeypatch):
+    write_test_skill(tmp_path)
+    monkeypatch.setenv("BID_DESIGN_WRITER_SKILL_DIR", str(tmp_path))
+
+    assert skill_source_label() == str(tmp_path)
+    assert "外部测试 Skill" in build_stage1_instructions()
+    assert "外部 12 章模板" in build_stage2_instructions("12-chapter")
+
+
+def test_skill_loader_invalid_external_override_does_not_fallback(tmp_path, monkeypatch):
+    missing = tmp_path / "missing-skill"
+    monkeypatch.setenv("BID_DESIGN_WRITER_SKILL_DIR", str(missing))
+
+    with pytest.raises(FileNotFoundError, match="外部覆盖路径"):
+        build_stage1_instructions()
+
+
+def test_skill_loader_reads_all_supported_templates(monkeypatch):
+    monkeypatch.delenv("BID_DESIGN_WRITER_SKILL_DIR", raising=False)
+
+    assert "12 章设计标模板参考" in build_stage2_instructions("auto")
+    assert "用户选择的模板参考" in build_stage2_instructions("12-chapter")
+    assert "用户选择的模板参考" in build_stage2_instructions("5-chapter")
