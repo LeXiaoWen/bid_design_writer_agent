@@ -12,6 +12,7 @@ import {
   MessageSquarePlus,
   PanelLeftClose,
   PanelLeftOpen,
+  Plus,
   Search,
   Send,
   Settings2,
@@ -108,8 +109,8 @@ function sleep(ms: number): Promise<void> {
 
 async function getAuthStatusWithRetry() {
   let lastError: unknown = null;
-  const maxAttempts = 30;
-  const delayMs = 300;
+  const maxAttempts = 180;
+  const delayMs = 500;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
       return await getAuthStatus();
@@ -120,7 +121,7 @@ async function getAuthStatusWithRetry() {
       await sleep(attempt === 0 ? 100 : delayMs);
     }
   }
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  throw lastError instanceof Error ? lastError : new Error("本地后端启动超时，请重新打开应用。");
 }
 
 function relativeTime(value: string): string {
@@ -225,6 +226,7 @@ export default function Home() {
   const [userChatAvatar, setUserChatAvatar] = useState("我");
   const [assistantChatAvatar, setAssistantChatAvatar] = useState("AI");
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const currentProject = useMemo(() => projects.find((project) => project.id === currentProjectId) ?? null, [projects, currentProjectId]);
@@ -259,6 +261,7 @@ export default function Home() {
       setAuthContext({ appSecret, token: savedToken });
       const status = await getAuthStatusWithRetry();
       setAuthBackendReady(true);
+      setError(null);
       if (status.setup_required) {
         setAuthMode("setup");
         return;
@@ -270,7 +273,6 @@ export default function Home() {
         await bootstrap();
         return;
       }
-      setAuthMode("login");
     } catch (caught) {
       setAuthBackendReady(false);
       setAuthMode("login");
@@ -803,6 +805,7 @@ export default function Home() {
     setConfigOpen(true);
     setUserPanelOpen(false);
     setModelMenuOpen(false);
+    setAttachmentMenuOpen(false);
     setWebSearchSaveState("idle");
     setWebSearchSaveMessage("");
   }
@@ -811,6 +814,7 @@ export default function Home() {
     setSidebarCollapsed(false);
     setConfigOpen(false);
     setModelMenuOpen(false);
+    setAttachmentMenuOpen(false);
     setUserPanelOpen((current) => !current);
   }
 
@@ -907,6 +911,7 @@ export default function Home() {
   }
 
   async function openModelMenu() {
+    setAttachmentMenuOpen(false);
     if (!currentProfileId) {
       openConfigPanel();
       setError("请先配置模型 API。");
@@ -956,10 +961,33 @@ export default function Home() {
     <div className="composer-toolbar">
       <div className="toolbar-left">
         <input ref={fileInputRef} type="file" accept=".pdf,.docx,.txt,.md" className="hidden-file-input" onChange={uploadTenderFile} />
-        <button type="button" className="tender-upload-button" onClick={() => fileInputRef.current?.click()} disabled={isBidBusy}>
-          <FileText size={17} />
-          <span>招标文件</span>
-        </button>
+        <div className="attachment-menu-wrap">
+          <button
+            type="button"
+            className="attachment-add-button"
+            onClick={() => setAttachmentMenuOpen((current) => !current)}
+            disabled={isBidBusy}
+            aria-label="添加"
+            aria-expanded={attachmentMenuOpen}
+          >
+            <Plus size={18} />
+          </button>
+          {attachmentMenuOpen && (
+            <div className="attachment-menu">
+              <button
+                type="button"
+                onClick={() => {
+                  setAttachmentMenuOpen(false);
+                  fileInputRef.current?.click();
+                }}
+                disabled={isBidBusy}
+              >
+                <FileText size={16} />
+                <span>上传招标文件</span>
+              </button>
+            </div>
+          )}
+        </div>
         {uploadProgress !== null && (
           <div className="upload-progress" title={uploadFileName}>
             <span>{uploadProgress}%</span>
@@ -1136,17 +1164,17 @@ export default function Home() {
             <h1>{authMode === "setup" ? "注册" : "登录"}</h1>
           </div>
           <div className="auth-tabs" role="tablist" aria-label="账号入口">
-            <button type="button" className={authMode === "login" ? "active" : ""} onClick={() => switchAuthMode("login")} disabled={!authBackendReady}>
+            <button type="button" className={authMode === "login" ? "active" : ""} onClick={() => switchAuthMode("login")}>
               登录
             </button>
-            <button type="button" className={authMode === "setup" ? "active" : ""} onClick={() => switchAuthMode("setup")} disabled={!authBackendReady}>
+            <button type="button" className={authMode === "setup" ? "active" : ""} onClick={() => switchAuthMode("setup")}>
               注册
             </button>
           </div>
           <form className="auth-form" onSubmit={submitAuth}>
             <label>
               用户名
-              <input value={authForm.username} onChange={(event) => setAuthForm({ ...authForm, username: event.target.value })} autoComplete="username" disabled={!authBackendReady} />
+              <input value={authForm.username} onChange={(event) => setAuthForm({ ...authForm, username: event.target.value })} autoComplete="username" />
             </label>
             <label>
               密码
@@ -1155,7 +1183,6 @@ export default function Home() {
                 type="password"
                 onChange={(event) => setAuthForm({ ...authForm, password: event.target.value })}
                 autoComplete={authMode === "setup" ? "new-password" : "current-password"}
-                disabled={!authBackendReady}
               />
             </label>
             {authMode === "setup" && (
@@ -1166,16 +1193,15 @@ export default function Home() {
                   type="password"
                   onChange={(event) => setAuthForm({ ...authForm, confirmPassword: event.target.value })}
                   autoComplete="new-password"
-                  disabled={!authBackendReady}
                 />
               </label>
             )}
-            <button type="submit" disabled={!authBackendReady}>{authMode === "setup" ? "注册并进入" : "登录"}</button>
+            <button type="submit">{authMode === "setup" ? "注册并进入" : "登录"}</button>
           </form>
           {!authBackendReady && (
             <div className="auth-status">
               <Loader2 size={16} className="spin-icon" />
-              <span>正在连接本地后端</span>
+              <span>正在连接本地后端，可先输入账号密码</span>
             </div>
           )}
           {error && <div className="auth-error">{error}</div>}
@@ -1498,7 +1524,7 @@ export default function Home() {
               <textarea
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
-                placeholder={currentProfileId ? "随心输入" : "先配置模型 API"}
+                placeholder={currentProfileId ? "随心输入或者上传招标文件" : "先配置模型 API"}
                 rows={2}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey) {
@@ -1551,7 +1577,7 @@ export default function Home() {
               <textarea
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
-                placeholder={currentProfileId ? "继续输入..." : "先配置模型 API"}
+                placeholder={currentProfileId ? "随心输入或者上传招标文件" : "先配置模型 API"}
                 rows={1}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey) {

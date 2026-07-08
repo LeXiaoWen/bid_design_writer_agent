@@ -209,7 +209,6 @@ textarea:focus {
 .toolbar-right,
 .access-button,
 .web-search-toggle,
-.tender-upload-button,
 .model-select,
 .choose-project,
 .message-status,
@@ -1010,7 +1009,6 @@ textarea:focus {
 
 .access-button,
 .web-search-toggle,
-.tender-upload-button,
 .model-select {
   gap: 7px;
   min-height: 32px;
@@ -1028,9 +1026,64 @@ textarea:focus {
   display: none;
 }
 
-.tender-upload-button {
-  color: #535b62;
+.attachment-menu-wrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.attachment-add-button {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #7e878f;
+}
+
+.attachment-add-button:hover,
+.attachment-add-button[aria-expanded="true"] {
+  background: rgba(116, 128, 138, 0.1);
+  color: #20262b;
+}
+
+.attachment-add-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.attachment-menu {
+  position: absolute;
+  z-index: 10;
+  bottom: calc(100% + 8px);
+  left: 0;
+  width: 176px;
+  border: 1px solid rgba(158, 168, 176, 0.24);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 16px 36px rgba(69, 82, 93, 0.14);
+  padding: 6px;
+}
+
+.attachment-menu button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #3f474e;
+  padding: 0 9px;
+  font-size: 14px;
   font-weight: 720;
+}
+
+.attachment-menu button:hover {
+  background: rgba(116, 128, 138, 0.1);
+  color: #20262b;
 }
 
 .web-search-toggle {
@@ -1042,7 +1095,6 @@ textarea:focus {
   color: var(--accent);
 }
 
-.tender-upload-button:hover,
 .web-search-toggle:hover {
   color: #20262b;
 }
@@ -1597,5 +1649,11 @@ textarea:focus {
   .toolbar-right {
     justify-content: space-between;
     width: 100%;
+  }
+
+  .attachment-menu {
+    right: auto;
+    left: 0;
+    max-width: calc(100vw - 32px);
   }
 }
