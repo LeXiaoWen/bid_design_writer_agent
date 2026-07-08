@@ -227,6 +227,7 @@ class ProviderProfileUpdate(BaseModel):
 class WebSearchConfig(BaseModel):
     provider: str = "tavily"
     has_key: bool = False
+    source: str = "none"  # "keychain" | "env" | "none"
     max_results: int = 5
     search_depth: str = "basic"
 

@@ -9,14 +9,6 @@ from threading import RLock
 from typing import Any, Iterable, Optional
 from uuid import uuid4
 
-try:
-    import keyring
-    from keyring.errors import KeyringError, PasswordDeleteError
-except Exception:  # pragma: no cover - exercised only when optional backend is unavailable.
-    keyring = None  # type: ignore[assignment]
-    KeyringError = Exception  # type: ignore[assignment]
-    PasswordDeleteError = Exception  # type: ignore[assignment]
-
 from ..schemas import (
     ArtifactInfo,
     AuthUser,
@@ -39,7 +31,6 @@ from ..schemas import (
 
 
 DEFAULT_PROJECT_TITLE = "默认项目"
-WEB_SEARCH_CREDENTIAL_KEY = "web-search:tavily"
 
 
 def utc_now() -> str:
@@ -63,80 +54,6 @@ def db_path() -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
     return data_dir() / "app.db"
-
-
-class CredentialStore:
-    """Store provider API keys in the system keyring, with explicit dev/test fallback."""
-
-    def __init__(self) -> None:
-        self._keys: dict[str, str] = {}
-        self._service = os.getenv("AI_WORKBENCH_KEYRING_SERVICE", "bid-design-writer-agent")
-
-    def _allow_memory_fallback(self) -> bool:
-        raw = os.getenv("AI_WORKBENCH_ALLOW_MEMORY_CREDENTIALS", "")
-        return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-    def _keyring_unavailable_error(self) -> RuntimeError:
-        return RuntimeError("系统钥匙串不可用。请检查操作系统凭据服务，或在开发/测试环境启用 AI_WORKBENCH_ALLOW_MEMORY_CREDENTIALS=true。")
-
-    def _fallback_or_raise(self) -> None:
-        if self._allow_memory_fallback():
-            return
-        raise self._keyring_unavailable_error()
-
-    def set(self, credential_key: str, api_key: str | None) -> None:
-        if not api_key:
-            return
-        if keyring is None:
-            self._fallback_or_raise()
-            self._keys[credential_key] = api_key
-            return
-        try:
-            keyring.set_password(self._service, credential_key, api_key)
-            self._keys[credential_key] = api_key
-        except Exception as exc:
-            if not self._allow_memory_fallback():
-                raise self._keyring_unavailable_error() from exc
-            self._keys[credential_key] = api_key
-
-    def get(self, credential_key: str) -> str | None:
-        if credential_key in self._keys:
-            return self._keys[credential_key]
-        if keyring is None:
-            self._fallback_or_raise()
-            return self._keys.get(credential_key)
-        try:
-            api_key = keyring.get_password(self._service, credential_key)
-            if api_key:
-                self._keys[credential_key] = api_key
-            return api_key
-        except Exception as exc:
-            if not self._allow_memory_fallback():
-                raise self._keyring_unavailable_error() from exc
-            return self._keys.get(credential_key)
-
-    def cached(self, credential_key: str) -> str | None:
-        return self._keys.get(credential_key)
-
-    def delete(self, credential_key: str) -> None:
-        self._keys.pop(credential_key, None)
-        if keyring is None:
-            if self._allow_memory_fallback():
-                return
-            raise self._keyring_unavailable_error()
-        try:
-            keyring.delete_password(self._service, credential_key)
-        except PasswordDeleteError:
-            return
-        except Exception as exc:
-            if not self._allow_memory_fallback():
-                raise self._keyring_unavailable_error() from exc
-
-    def has(self, credential_key: str) -> bool:
-        return self.get(credential_key) is not None
-
-
-credentials = CredentialStore()
 
 
 class WorkbenchStore:
@@ -267,8 +184,42 @@ class WorkbenchStore:
             provider_has_key_added = self._ensure_column("provider_profiles", "has_key", "INTEGER NOT NULL DEFAULT 0")
             if provider_has_key_added:
                 self._connection.execute("UPDATE provider_profiles SET has_key = 1")
+            api_key_added = self._ensure_column("provider_profiles", "api_key", "TEXT")
+            if api_key_added:
+                self._migrate_provider_keys_from_keychain()
             self._ensure_single_user_index()
         self.ensure_default_project()
+
+    def _migrate_provider_keys_from_keychain(self) -> None:
+        """一次性迁移：将 keyring 中的旧 key 迁移到 DB 的 api_key 列。"""
+        try:
+            import keyring as _keyring
+        except Exception:
+            return
+        service = os.getenv("AI_WORKBENCH_KEYRING_SERVICE", "bid-design-writer-agent")
+        rows = self._execute("SELECT id, credential_key FROM provider_profiles WHERE api_key IS NULL AND has_key = 1").fetchall()
+        for row in rows:
+            try:
+                api_key = _keyring.get_password(service, row["credential_key"])
+                if api_key:
+                    self._execute("UPDATE provider_profiles SET api_key = ? WHERE id = ?", (api_key, row["id"]))
+                    try:
+                        _keyring.delete_password(service, row["credential_key"])
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        # 迁移 Tavily key
+        try:
+            tavily_key = _keyring.get_password(service, "web-search:tavily")
+            if tavily_key:
+                self.set_setting("web_search.api_key", tavily_key)
+                try:
+                    _keyring.delete_password(service, "web-search:tavily")
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         with self._lock:
@@ -749,30 +700,26 @@ class WorkbenchStore:
         profile_id = str(uuid4())
         now = utc_now()
         credential_key = f"provider:{profile_id}"
-        credentials.set(credential_key, request.api_key)
-        try:
-            with self._lock, self._connection:
-                self._execute(
-                    """
-                INSERT INTO provider_profiles (id, provider, display_name, base_url, model, credential_key, has_key, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        api_key = request.api_key.strip() if request.api_key else None
+        with self._lock, self._connection:
+            self._execute(
+                """
+                INSERT INTO provider_profiles (id, provider, display_name, base_url, model, credential_key, has_key, api_key, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     profile_id,
-                        request.provider,
-                        request.display_name,
+                    request.provider,
+                    request.display_name,
                     request.base_url,
                     request.model,
                     credential_key,
-                    1 if request.api_key else 0,
+                    1 if api_key else 0,
+                    api_key,
                     now,
                     now,
                 ),
-                )
-        except Exception:
-            if request.api_key:
-                credentials.delete(credential_key)
-            raise
+            )
         return self.get_provider_profile(profile_id)
 
     def get_provider_profile(self, profile_id: str) -> ProviderProfile:
@@ -783,13 +730,20 @@ class WorkbenchStore:
 
     def update_provider_profile(self, profile_id: str, request: ProviderProfileUpdate) -> ProviderProfile:
         profile = self.get_provider_profile(profile_id)
+        row = self._execute("SELECT api_key FROM provider_profiles WHERE id = ?", (profile_id,)).fetchone()
+        current_api_key = row["api_key"] if row else None
         now = utc_now()
-        credentials.set(profile.credential_key, request.api_key)
+        if request.api_key is not None:
+            api_key = request.api_key.strip() if request.api_key else None
+            has_key = 1 if api_key else 0
+        else:
+            api_key = current_api_key
+            has_key = int(profile.has_key)
         with self._lock, self._connection:
             self._execute(
                 """
                 UPDATE provider_profiles
-                SET provider = ?, display_name = ?, base_url = ?, model = ?, has_key = ?, updated_at = ?
+                SET provider = ?, display_name = ?, base_url = ?, model = ?, has_key = ?, api_key = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -797,7 +751,8 @@ class WorkbenchStore:
                     request.display_name if request.display_name is not None else profile.display_name,
                     request.base_url if request.base_url is not None else profile.base_url,
                     request.model if request.model is not None else profile.model,
-                    1 if request.api_key else int(profile.has_key),
+                    has_key,
+                    api_key,
                     now,
                     profile_id,
                 ),
@@ -830,9 +785,11 @@ class WorkbenchStore:
         max_results = min(max(max_results, 1), 10)
         if search_depth not in {"basic", "advanced"}:
             search_depth = "basic"
+        key, source = self._resolve_tavily_api_key_with_source()
         return WebSearchConfig(
             provider="tavily",
-            has_key=self.resolve_tavily_api_key() is not None,
+            has_key=key is not None,
+            source=source,
             max_results=max_results,
             search_depth=search_depth,
         )
@@ -840,10 +797,10 @@ class WorkbenchStore:
     def update_web_search_config(self, request: WebSearchConfigUpdate) -> WebSearchConfig:
         if request.api_key is not None:
             if request.api_key.strip():
-                credentials.set(WEB_SEARCH_CREDENTIAL_KEY, request.api_key.strip())
+                self.set_setting("web_search.api_key", request.api_key.strip())
                 self.set_setting("web_search.has_key", "1")
             else:
-                credentials.delete(WEB_SEARCH_CREDENTIAL_KEY)
+                self.set_setting("web_search.api_key", "")
                 self.set_setting("web_search.has_key", "0")
         if request.max_results is not None:
             self.set_setting("web_search.max_results", str(request.max_results))
@@ -852,27 +809,36 @@ class WorkbenchStore:
         return self.get_web_search_config()
 
     def delete_provider_profile(self, profile_id: str) -> None:
-        profile = self.get_provider_profile(profile_id)
         with self._lock, self._connection:
             self._execute("DELETE FROM provider_profiles WHERE id = ?", (profile_id,))
-        credentials.delete(profile.credential_key)
 
     def resolve_api_key(self, profile_id: str | None, inline_api_key: str | None = None) -> str | None:
         if inline_api_key:
             return inline_api_key
         if not profile_id:
             return None
-        profile = self.get_provider_profile(profile_id)
-        return credentials.get(profile.credential_key)
+        row = self._execute("SELECT api_key FROM provider_profiles WHERE id = ?", (profile_id,)).fetchone()
+        if not row:
+            raise KeyError(profile_id)
+        return row["api_key"] or None
 
     def resolve_tavily_api_key(self) -> str | None:
-        cached = credentials.cached(WEB_SEARCH_CREDENTIAL_KEY)
-        if cached:
-            return cached
+        """返回 Tavily API key。
+
+        优先级：DB 中用户保存的 key > 环境变量（.env 部署默认）。
+        """
+        key, _ = self._resolve_tavily_api_key_with_source()
+        return key
+
+    def _resolve_tavily_api_key_with_source(self) -> tuple[str | None, str]:
+        """返回 (api_key, source)，source 为 'db' / 'env' / 'none'。"""
+        db_key = self.get_setting("web_search.api_key")
+        if db_key:
+            return db_key, "db"
         env_key = os.getenv("TAVILY_API_KEY", "").strip()
         if env_key:
-            return env_key
-        return credentials.get(WEB_SEARCH_CREDENTIAL_KEY)
+            return env_key, "env"
+        return None, "none"
 
     def search(self, query: str) -> list[SearchResult]:
         trimmed = query.strip()

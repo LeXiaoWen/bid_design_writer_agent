@@ -50,6 +50,7 @@ export type ProviderModel = {
 export type WebSearchConfig = {
   provider: "tavily" | string;
   has_key: boolean;
+  source: "db" | "env" | "none" | string;
   max_results: number;
   search_depth: "basic" | "advanced" | string;
 };

@@ -10,7 +10,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 os.environ["AI_WORKBENCH_DB_PATH"] = str(Path(tempfile.gettempdir()) / f"ai-workbench-test-{uuid4()}.db")
-os.environ["AI_WORKBENCH_ALLOW_MEMORY_CREDENTIALS"] = "true"
 os.environ["APP_AUTH_SECRET"] = "test-app-secret"
 
 from backend.main import app

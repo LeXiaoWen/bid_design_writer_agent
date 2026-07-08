@@ -1234,7 +1234,7 @@ export default function Home() {
                 </label>
                 <label className="api-key-field">
                   API key
-                  <input value={apiKey} type="password" onChange={(event) => setApiKey(event.target.value)} placeholder="保存到系统钥匙串" />
+                  <input value={apiKey} type="password" onChange={(event) => setApiKey(event.target.value)} placeholder="保存到本地数据库" />
                 </label>
               </div>
               <div className="config-actions">
@@ -1248,8 +1248,19 @@ export default function Home() {
             <form className="config-section" onSubmit={saveWebSearchConfig}>
               <div className="config-section-title">
                 <span>联网搜索</span>
-                <em>{webSearchConfig?.has_key ? "已配置" : "未配置"}</em>
+                <em>
+                  {webSearchConfig?.source === "db"
+                    ? "已配置（本地）"
+                    : webSearchConfig?.source === "env"
+                      ? "已配置（环境变量）"
+                      : "未配置"}
+                </em>
               </div>
+              {webSearchConfig?.source === "env" && (
+                <div className="config-message">
+                  当前 key 来自环境变量（.env 文件），优先级低于本地保存的 key。在下方填写新 key 保存后将覆盖。
+                </div>
+              )}
               <div className="config-grid">
                 <label className="api-key-field">
                   Tavily API key
@@ -1257,7 +1268,13 @@ export default function Home() {
                     value={webSearchForm.api_key}
                     type="password"
                     onChange={(event) => setWebSearchForm({ ...webSearchForm, api_key: event.target.value })}
-                    placeholder={webSearchConfig?.has_key ? "留空则保留现有 key" : "填写 Tavily API key"}
+                    placeholder={
+                      webSearchConfig?.source === "db"
+                        ? "留空则保留现有 key"
+                        : webSearchConfig?.source === "env"
+                          ? "填写后保存到本地（替代环境变量）"
+                          : "填写 Tavily API key"
+                    }
                     disabled={webSearchSaveState === "saving"}
                   />
                 </label>
