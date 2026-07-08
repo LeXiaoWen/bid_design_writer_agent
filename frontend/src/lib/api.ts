@@ -22,7 +22,7 @@ let apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8765"
 let authToken: string | null = null;
 let appAuthSecret: string | null = null;
 const APP_AUTH_SECRET_STORAGE_KEY = "ai-workbench-app-auth-secret";
-const LOCAL_BACKEND_RETRY_ATTEMPTS = 40;
+const LOCAL_BACKEND_RETRY_ATTEMPTS = 10;
 const LOCAL_BACKEND_RETRY_DELAY_MS = 250;
 
 export function setApiBaseUrl(url: string | null | undefined): void {
@@ -79,6 +79,14 @@ async function fetchWithLocalRetry(url: string, options?: RequestInit): Promise<
   throw lastError instanceof Error ? localBackendConnectionError() : localBackendConnectionError();
 }
 
+async function requestOnce(path: string, options?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(`${apiBaseUrl}${path}`, withAuthHeaders(options));
+  } catch {
+    throw localBackendConnectionError();
+  }
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   let response: Response;
   try {
@@ -99,12 +107,28 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+/** 单次请求，不重试。用于状态轮询场景，由外层控制重试节奏。 */
+async function quickRequest<T>(path: string, options?: RequestInit): Promise<T> {
+  const response = await requestOnce(path, options);
+  if (!response.ok) {
+    let detail = `请求失败：${response.status}`;
+    try {
+      const payload = await response.json();
+      detail = payload.detail ?? detail;
+    } catch {
+      // Keep the status fallback.
+    }
+    throw new Error(detail);
+  }
+  return response.json() as Promise<T>;
+}
+
 export function getHealth(): Promise<HealthResponse> {
   return request<HealthResponse>("/health");
 }
 
 export function getAuthStatus(): Promise<AuthStatus> {
-  return request<AuthStatus>("/api/v1/auth/status");
+  return quickRequest<AuthStatus>("/api/v1/auth/status");
 }
 
 export function setupAuth(input: { username: string; password: string }): Promise<AuthLoginResponse> {

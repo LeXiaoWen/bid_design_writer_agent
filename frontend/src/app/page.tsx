@@ -108,14 +108,16 @@ function sleep(ms: number): Promise<void> {
 
 async function getAuthStatusWithRetry() {
   let lastError: unknown = null;
-  for (let attempt = 0; attempt < 120; attempt += 1) {
+  const maxAttempts = 30;
+  const delayMs = 300;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
       return await getAuthStatus();
     } catch (caught) {
       lastError = caught;
       const message = caught instanceof Error ? caught.message : String(caught);
       if (!message.includes("无法连接本地后端")) throw caught;
-      await sleep(500);
+      await sleep(attempt === 0 ? 100 : delayMs);
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
