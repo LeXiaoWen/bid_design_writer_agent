@@ -182,7 +182,7 @@ def test_tavily_search_calls_api_and_builds_context(monkeypatch):
     monkeypatch.setattr("backend.services.web_search.workbench_store.resolve_tavily_api_key", lambda: "test-key")
     monkeypatch.setattr(
         "backend.services.web_search.workbench_store.get_web_search_config",
-        lambda: WebSearchConfig(has_key=True, source="keychain", max_results=2, search_depth="basic"),
+        lambda: WebSearchConfig(has_key=True, source="db", max_results=2, search_depth="basic"),
     )
     monkeypatch.setattr("backend.services.web_search.httpx.AsyncClient", FakeClient)
 

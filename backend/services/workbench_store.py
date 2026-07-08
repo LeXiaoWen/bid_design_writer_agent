@@ -184,42 +184,9 @@ class WorkbenchStore:
             provider_has_key_added = self._ensure_column("provider_profiles", "has_key", "INTEGER NOT NULL DEFAULT 0")
             if provider_has_key_added:
                 self._connection.execute("UPDATE provider_profiles SET has_key = 1")
-            api_key_added = self._ensure_column("provider_profiles", "api_key", "TEXT")
-            if api_key_added:
-                self._migrate_provider_keys_from_keychain()
+            self._ensure_column("provider_profiles", "api_key", "TEXT")
             self._ensure_single_user_index()
         self.ensure_default_project()
-
-    def _migrate_provider_keys_from_keychain(self) -> None:
-        """一次性迁移：将 keyring 中的旧 key 迁移到 DB 的 api_key 列。"""
-        try:
-            import keyring as _keyring
-        except Exception:
-            return
-        service = os.getenv("AI_WORKBENCH_KEYRING_SERVICE", "bid-design-writer-agent")
-        rows = self._execute("SELECT id, credential_key FROM provider_profiles WHERE api_key IS NULL AND has_key = 1").fetchall()
-        for row in rows:
-            try:
-                api_key = _keyring.get_password(service, row["credential_key"])
-                if api_key:
-                    self._execute("UPDATE provider_profiles SET api_key = ? WHERE id = ?", (api_key, row["id"]))
-                    try:
-                        _keyring.delete_password(service, row["credential_key"])
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-        # 迁移 Tavily key
-        try:
-            tavily_key = _keyring.get_password(service, "web-search:tavily")
-            if tavily_key:
-                self.set_setting("web_search.api_key", tavily_key)
-                try:
-                    _keyring.delete_password(service, "web-search:tavily")
-                except Exception:
-                    pass
-        except Exception:
-            pass
 
     def _execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         with self._lock:
