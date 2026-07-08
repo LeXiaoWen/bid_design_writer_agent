@@ -11,6 +11,7 @@ import type {
   ProviderModel,
   ProviderProfile,
   SearchResult,
+  WebSearchConfig,
   WorkbenchConversation,
   WorkbenchMessage,
   WorkbenchProject,
@@ -20,6 +21,9 @@ let apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8765"
 
 let authToken: string | null = null;
 let appAuthSecret: string | null = null;
+const APP_AUTH_SECRET_STORAGE_KEY = "ai-workbench-app-auth-secret";
+const LOCAL_BACKEND_RETRY_ATTEMPTS = 40;
+const LOCAL_BACKEND_RETRY_DELAY_MS = 250;
 
 export function setApiBaseUrl(url: string | null | undefined): void {
   if (url) apiBaseUrl = url.replace(/\/$/, "");
@@ -27,22 +31,60 @@ export function setApiBaseUrl(url: string | null | undefined): void {
 
 export function setAuthContext(next: { token?: string | null; appSecret?: string | null }): void {
   if ("token" in next) authToken = next.token ?? null;
-  if ("appSecret" in next) appAuthSecret = next.appSecret ?? null;
+  if ("appSecret" in next) {
+    appAuthSecret = next.appSecret ?? null;
+    if (typeof window !== "undefined") {
+      if (appAuthSecret) {
+        window.sessionStorage.setItem(APP_AUTH_SECRET_STORAGE_KEY, appAuthSecret);
+      } else {
+        window.sessionStorage.removeItem(APP_AUTH_SECRET_STORAGE_KEY);
+      }
+    }
+  }
+}
+
+function currentAppAuthSecret(): string | null {
+  if (appAuthSecret) return appAuthSecret;
+  if (typeof window === "undefined") return null;
+  appAuthSecret = window.sessionStorage.getItem(APP_AUTH_SECRET_STORAGE_KEY);
+  return appAuthSecret;
 }
 
 function withAuthHeaders(options?: RequestInit): RequestInit {
   const headers = new Headers(options?.headers);
   if (authToken) headers.set("Authorization", `Bearer ${authToken}`);
-  if (appAuthSecret) headers.set("X-App-Auth-Secret", appAuthSecret);
+  const secret = currentAppAuthSecret();
+  if (secret) headers.set("X-App-Auth-Secret", secret);
   return { ...options, headers };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function localBackendConnectionError(): Error {
+  return new Error(`无法连接本地后端：${apiBaseUrl}。请确认桌面应用后端已启动，或检查当前页面地址是否被 CORS 允许。`);
+}
+
+async function fetchWithLocalRetry(url: string, options?: RequestInit): Promise<Response> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < LOCAL_BACKEND_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return await fetch(url, options);
+    } catch (caught) {
+      lastError = caught;
+      await sleep(LOCAL_BACKEND_RETRY_DELAY_MS);
+    }
+  }
+  throw lastError instanceof Error ? localBackendConnectionError() : localBackendConnectionError();
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`${apiBaseUrl}${path}`, withAuthHeaders(options));
+    response = await fetchWithLocalRetry(`${apiBaseUrl}${path}`, withAuthHeaders(options));
   } catch (error) {
-    throw new Error(`无法连接本地后端：${apiBaseUrl}。请确认桌面应用后端已启动，或检查当前页面地址是否被 CORS 允许。`);
+    throw localBackendConnectionError();
   }
   if (!response.ok) {
     let detail = `请求失败：${response.status}`;
@@ -181,6 +223,22 @@ export async function listProviderModels(profileId: string): Promise<ProviderMod
 
 export function searchWorkbench(query: string): Promise<SearchResult[]> {
   return request<SearchResult[]>(`/api/v1/search?q=${encodeURIComponent(query)}`);
+}
+
+export function getWebSearchConfig(): Promise<WebSearchConfig> {
+  return request<WebSearchConfig>("/api/v1/web-search-config");
+}
+
+export function updateWebSearchConfig(input: {
+  api_key?: string;
+  max_results?: number;
+  search_depth?: string;
+}): Promise<WebSearchConfig> {
+  return request<WebSearchConfig>("/api/v1/web-search-config", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
 }
 
 export function cancelChat(runId: string): Promise<{ ok: boolean }> {
@@ -322,10 +380,11 @@ export async function streamChat(
     api_key?: string;
     message: string;
     system_prompt?: string;
+    web_search_enabled?: boolean;
   },
   onEvent: (event: ChatStreamEvent) => void,
 ): Promise<void> {
-  const response = await fetch(`${apiBaseUrl}/api/v1/chat/stream`, {
+  const response = await fetchWithLocalRetry(`${apiBaseUrl}/api/v1/chat/stream`, {
     ...withAuthHeaders({
     method: "POST",
     headers: { "Content-Type": "application/json" },

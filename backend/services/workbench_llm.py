@@ -9,6 +9,7 @@ from openai import AsyncOpenAI
 
 from ..schemas import BidWorkflowStatus, ChatStreamRequest, WorkbenchConversationCreate
 from .behavior_report import save_behavior_report
+from .web_search import build_search_context, tavily_search
 from .workbench_store import workbench_store
 
 
@@ -106,9 +107,30 @@ async def stream_chat(request: ChatStreamRequest) -> AsyncIterator[str]:
             },
         )
 
-    messages: list[dict[str, str]] = []
+    system_parts: list[str] = []
     if request.system_prompt:
-        messages.append({"role": "system", "content": request.system_prompt})
+        system_parts.append(request.system_prompt)
+    if request.web_search_enabled:
+        try:
+            search_results = await tavily_search(request.message)
+            system_parts.append(build_search_context(search_results))
+        except Exception as exc:
+            message = str(exc)
+            system_parts.append(f"（联网搜索暂时不可用：{message}。请基于已有知识回答，并提示用户稍后重试。）")
+            yield sse_event(
+                "warning",
+                {
+                    "conversation_id": conversation.id,
+                    "message_id": assistant_message.id,
+                    "type": exc.__class__.__name__,
+                    "message": message,
+                },
+            )
+
+    if system_parts:
+        messages: list[dict[str, str]] = [{"role": "system", "content": "\n\n".join(system_parts)}]
+    else:
+        messages = []
     messages.extend({"role": message.role, "content": message.content} for message in previous_messages if message.status != "error")
     messages.append({"role": "user", "content": request.message})
     messages = _normalize_messages(messages)

@@ -1,5 +1,6 @@
 from datetime import datetime
 import os
+import re
 from urllib.parse import quote, unquote
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -30,6 +31,8 @@ from .schemas import (
     WorkbenchConversationUpdate,
     WorkbenchProjectCreate,
     WorkbenchProjectUpdate,
+    WebSearchConfig,
+    WebSearchConfigUpdate,
 )
 from .services.artifacts import build_output_files, make_zip
 from .services.auth import AuthRateLimitError, change_password, login_user, logout_token, setup_user, user_from_token
@@ -92,6 +95,19 @@ def app_auth_secret_is_valid(request: Request) -> bool:
     return request.headers.get("x-app-auth-secret", "") == expected
 
 
+def auth_error_response(request: Request, status_code: int, detail: str) -> JSONResponse:
+    response = JSONResponse(status_code=status_code, content={"detail": detail})
+    origin = request.headers.get("origin")
+    origin_is_allowed = origin in get_cors_origins()
+    origin_regex = os.getenv("FRONTEND_ORIGIN_REGEX", LOCAL_FRONTEND_ORIGIN_REGEX)
+    if origin and (origin_is_allowed or re.match(origin_regex, origin)):
+        response.headers["access-control-allow-origin"] = origin
+        response.headers["access-control-allow-credentials"] = "true"
+        response.headers["access-control-allow-private-network"] = "true"
+        response.headers["vary"] = "Origin"
+    return response
+
+
 @app.middleware("http")
 async def require_local_auth(request: Request, call_next):
     path = request.url.path
@@ -102,14 +118,14 @@ async def require_local_auth(request: Request, call_next):
         return await call_next(request)
 
     if not app_auth_secret_is_valid(request):
-        return JSONResponse(status_code=403, content={"detail": "本机访问密钥无效。"})
+        return auth_error_response(request, 403, "本机访问密钥无效。")
 
     if path in PUBLIC_API_V1_PATHS:
         return await call_next(request)
 
     user = user_from_token(bearer_token(request))
     if user is None:
-        return JSONResponse(status_code=401, content={"detail": "请先登录。"})
+        return auth_error_response(request, 401, "请先登录。")
     request.state.user = user
     return await call_next(request)
 
@@ -420,6 +436,16 @@ def delete_provider_profile(profile_id: str):
 @app.get("/api/v1/search")
 def search_workbench(q: str = Query(default="")):
     return workbench_store.search(q)
+
+
+@app.get("/api/v1/web-search-config", response_model=WebSearchConfig)
+def get_web_search_config():
+    return workbench_store.get_web_search_config()
+
+
+@app.patch("/api/v1/web-search-config", response_model=WebSearchConfig)
+def update_web_search_config(request: WebSearchConfigUpdate):
+    return workbench_store.update_web_search_config(request)
 
 
 @app.post("/api/v1/chat/stream")

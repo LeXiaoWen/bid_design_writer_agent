@@ -26,6 +26,8 @@ from ..schemas import (
     ProviderProfileCreate,
     ProviderProfileUpdate,
     SearchResult,
+    WebSearchConfig,
+    WebSearchConfigUpdate,
     WorkbenchConversation,
     WorkbenchConversationCreate,
     WorkbenchConversationUpdate,
@@ -37,6 +39,7 @@ from ..schemas import (
 
 
 DEFAULT_PROJECT_TITLE = "默认项目"
+WEB_SEARCH_CREDENTIAL_KEY = "web-search:tavily"
 
 
 def utc_now() -> str:
@@ -90,7 +93,7 @@ class CredentialStore:
             return
         try:
             keyring.set_password(self._service, credential_key, api_key)
-            self._keys.pop(credential_key, None)
+            self._keys[credential_key] = api_key
         except Exception as exc:
             if not self._allow_memory_fallback():
                 raise self._keyring_unavailable_error() from exc
@@ -103,11 +106,17 @@ class CredentialStore:
             self._fallback_or_raise()
             return self._keys.get(credential_key)
         try:
-            return keyring.get_password(self._service, credential_key)
+            api_key = keyring.get_password(self._service, credential_key)
+            if api_key:
+                self._keys[credential_key] = api_key
+            return api_key
         except Exception as exc:
             if not self._allow_memory_fallback():
                 raise self._keyring_unavailable_error() from exc
             return self._keys.get(credential_key)
+
+    def cached(self, credential_key: str) -> str | None:
+        return self._keys.get(credential_key)
 
     def delete(self, credential_key: str) -> None:
         self._keys.pop(credential_key, None)
@@ -183,6 +192,7 @@ class WorkbenchStore:
                     base_url TEXT NOT NULL,
                     model TEXT NOT NULL,
                     credential_key TEXT NOT NULL UNIQUE,
+                    has_key INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -233,6 +243,12 @@ class WorkbenchStore:
                     revoked_at TEXT
                 );
 
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_active_bid_workflows_per_conversation
                 ON bid_workflows(conversation_id)
                 WHERE status IN ('uploaded', 'extracting', 'extraction_ready', 'generating', 'failed');
@@ -248,6 +264,9 @@ class WorkbenchStore:
                 """
             )
             self._ensure_column("projects", "workspace_path", "TEXT")
+            provider_has_key_added = self._ensure_column("provider_profiles", "has_key", "INTEGER NOT NULL DEFAULT 0")
+            if provider_has_key_added:
+                self._connection.execute("UPDATE provider_profiles SET has_key = 1")
             self._ensure_single_user_index()
         self.ensure_default_project()
 
@@ -255,10 +274,12 @@ class WorkbenchStore:
         with self._lock:
             return self._connection.execute(sql, tuple(params))
 
-    def _ensure_column(self, table: str, column: str, declaration: str) -> None:
+    def _ensure_column(self, table: str, column: str, declaration: str) -> bool:
         columns = {row["name"] for row in self._connection.execute(f"PRAGMA table_info({table})").fetchall()}
         if column not in columns:
             self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+            return True
+        return False
 
     def _ensure_single_user_index(self) -> None:
         count = self._execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]
@@ -733,19 +754,20 @@ class WorkbenchStore:
             with self._lock, self._connection:
                 self._execute(
                     """
-                    INSERT INTO provider_profiles (id, provider, display_name, base_url, model, credential_key, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        profile_id,
+                INSERT INTO provider_profiles (id, provider, display_name, base_url, model, credential_key, has_key, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    profile_id,
                         request.provider,
                         request.display_name,
-                        request.base_url,
-                        request.model,
-                        credential_key,
-                        now,
-                        now,
-                    ),
+                    request.base_url,
+                    request.model,
+                    credential_key,
+                    1 if request.api_key else 0,
+                    now,
+                    now,
+                ),
                 )
         except Exception:
             if request.api_key:
@@ -767,7 +789,7 @@ class WorkbenchStore:
             self._execute(
                 """
                 UPDATE provider_profiles
-                SET provider = ?, display_name = ?, base_url = ?, model = ?, updated_at = ?
+                SET provider = ?, display_name = ?, base_url = ?, model = ?, has_key = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -775,11 +797,59 @@ class WorkbenchStore:
                     request.display_name if request.display_name is not None else profile.display_name,
                     request.base_url if request.base_url is not None else profile.base_url,
                     request.model if request.model is not None else profile.model,
+                    1 if request.api_key else int(profile.has_key),
                     now,
                     profile_id,
                 ),
             )
         return self.get_provider_profile(profile_id)
+
+    def get_setting(self, key: str) -> str | None:
+        row = self._execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        now = utc_now()
+        with self._lock, self._connection:
+            self._execute(
+                """
+                INSERT INTO app_settings (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """,
+                (key, value, now),
+            )
+
+    def get_web_search_config(self) -> WebSearchConfig:
+        max_results_raw = self.get_setting("web_search.max_results")
+        search_depth = self.get_setting("web_search.search_depth") or os.getenv("TAVILY_SEARCH_DEPTH", "basic")
+        try:
+            max_results = int(max_results_raw or os.getenv("WEB_SEARCH_MAX_RESULTS", "5"))
+        except ValueError:
+            max_results = 5
+        max_results = min(max(max_results, 1), 10)
+        if search_depth not in {"basic", "advanced"}:
+            search_depth = "basic"
+        return WebSearchConfig(
+            provider="tavily",
+            has_key=self.resolve_tavily_api_key() is not None,
+            max_results=max_results,
+            search_depth=search_depth,
+        )
+
+    def update_web_search_config(self, request: WebSearchConfigUpdate) -> WebSearchConfig:
+        if request.api_key is not None:
+            if request.api_key.strip():
+                credentials.set(WEB_SEARCH_CREDENTIAL_KEY, request.api_key.strip())
+                self.set_setting("web_search.has_key", "1")
+            else:
+                credentials.delete(WEB_SEARCH_CREDENTIAL_KEY)
+                self.set_setting("web_search.has_key", "0")
+        if request.max_results is not None:
+            self.set_setting("web_search.max_results", str(request.max_results))
+        if request.search_depth is not None:
+            self.set_setting("web_search.search_depth", request.search_depth)
+        return self.get_web_search_config()
 
     def delete_provider_profile(self, profile_id: str) -> None:
         profile = self.get_provider_profile(profile_id)
@@ -794,6 +864,15 @@ class WorkbenchStore:
             return None
         profile = self.get_provider_profile(profile_id)
         return credentials.get(profile.credential_key)
+
+    def resolve_tavily_api_key(self) -> str | None:
+        cached = credentials.cached(WEB_SEARCH_CREDENTIAL_KEY)
+        if cached:
+            return cached
+        env_key = os.getenv("TAVILY_API_KEY", "").strip()
+        if env_key:
+            return env_key
+        return credentials.get(WEB_SEARCH_CREDENTIAL_KEY)
 
     def search(self, query: str) -> list[SearchResult]:
         trimmed = query.strip()
@@ -912,7 +991,7 @@ class WorkbenchStore:
             base_url=row["base_url"],
             model=row["model"],
             credential_key=row["credential_key"],
-            has_key=credentials.has(row["credential_key"]),
+            has_key=bool(row["has_key"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )

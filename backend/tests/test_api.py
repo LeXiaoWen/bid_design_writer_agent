@@ -58,6 +58,18 @@ def test_v1_routes_require_app_secret_and_login():
     assert status.json()["authenticated"] is False
 
 
+def test_auth_error_keeps_cors_headers_for_app_frontend():
+    bare_client = TestClient(app)
+    response = bare_client.patch(
+        "/api/v1/web-search-config",
+        headers={"Origin": "app://frontend"},
+        json={"max_results": 5},
+    )
+    assert response.status_code == 403
+    assert response.headers["access-control-allow-origin"] == "app://frontend"
+    assert response.json()["detail"] == "本机访问密钥无效。"
+
+
 def test_legacy_project_routes_are_removed():
     bare_client = TestClient(app)
     response = bare_client.post("/api/projects")
@@ -188,6 +200,24 @@ def test_provider_profile_does_not_echo_api_key():
     listed = client.get("/api/v1/provider-profiles")
     assert listed.status_code == 200
     assert any(profile["id"] == payload["id"] for profile in listed.json())
+
+
+def test_web_search_config_does_not_echo_tavily_key():
+    initial = client.get("/api/v1/web-search-config")
+    assert initial.status_code == 200
+    assert "api_key" not in initial.json()
+
+    updated = client.patch(
+        "/api/v1/web-search-config",
+        json={"api_key": "tvly-test-secret", "max_results": 3, "search_depth": "advanced"},
+    )
+    assert updated.status_code == 200
+    payload = updated.json()
+    assert payload["provider"] == "tavily"
+    assert payload["has_key"] is True
+    assert payload["max_results"] == 3
+    assert payload["search_depth"] == "advanced"
+    assert "api_key" not in payload
 
 
 def test_provider_models_can_be_listed(monkeypatch):

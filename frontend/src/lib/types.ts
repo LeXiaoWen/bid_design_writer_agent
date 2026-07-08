@@ -47,6 +47,13 @@ export type ProviderModel = {
   name: string;
 };
 
+export type WebSearchConfig = {
+  provider: "tavily" | string;
+  has_key: boolean;
+  max_results: number;
+  search_depth: "basic" | "advanced" | string;
+};
+
 export type ProviderModelsResponse = {
   models: ProviderModel[];
 };
@@ -168,5 +175,14 @@ export type ChatStreamEvent =
         type: string;
         message: string;
         content?: string;
+      };
+    }
+  | {
+      event: "warning";
+      data: {
+        conversation_id?: string;
+        message_id?: string;
+        type: string;
+        message: string;
       };
     };

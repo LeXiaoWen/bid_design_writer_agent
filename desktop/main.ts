@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from "electron";
 import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { accessSync, constants, existsSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:net";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -9,6 +9,9 @@ import { pathToFileURL } from "node:url";
 const FRONTEND_URL = process.env.FRONTEND_URL ?? "http://localhost:3000";
 let backendUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8765";
 const APP_AUTH_SECRET = process.env.APP_AUTH_SECRET ?? randomBytes(32).toString("base64url");
+const BACKEND_READY_TIMEOUT_MS = 30_000;
+const BACKEND_READY_INTERVAL_MS = 300;
+const BACKEND_SHUTDOWN_GRACE_MS = 1_500;
 let backendProcess: ChildProcessWithoutNullStreams | null = null;
 let backendStartPromise: Promise<void> | null = null;
 let mainWindow: BrowserWindow | null = null;
@@ -69,6 +72,19 @@ async function backendIsReady(): Promise<boolean> {
   }
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForBackendReady(): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < BACKEND_READY_TIMEOUT_MS) {
+    if (await backendIsReady()) return;
+    await delay(BACKEND_READY_INTERVAL_MS);
+  }
+  throw new Error(`本地后端启动超时：${backendUrl}`);
+}
+
 function backendPort(): string {
   return new URL(backendUrl).port || "80";
 }
@@ -88,6 +104,40 @@ function executableFileExists(filePath: string): boolean {
   }
 }
 
+function parseEnvFile(filePath: string): Record<string, string> {
+  if (!existsSync(filePath)) return {};
+  const parsed: Record<string, string> = {};
+  const content = readFileSync(filePath, "utf8");
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const separatorIndex = line.indexOf("=");
+    if (separatorIndex <= 0) continue;
+    const key = line.slice(0, separatorIndex).trim();
+    let value = line.slice(separatorIndex + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    parsed[key] = value;
+  }
+  return parsed;
+}
+
+function loadEnvFiles(): Record<string, string> {
+  const candidates = [
+    path.resolve(__dirname, "..", ".env"),
+    path.join(process.cwd(), ".env"),
+    path.join(path.dirname(app.getAppPath()), ".env"),
+    path.join(process.resourcesPath, ".env"),
+    path.join(app.getPath("userData"), ".env"),
+  ];
+  const env: Record<string, string> = {};
+  for (const filePath of [...new Set(candidates)]) {
+    Object.assign(env, parseEnvFile(filePath));
+  }
+  return env;
+}
+
 function startBackend(): void {
   if (backendProcess) return;
   const dataDir = path.join(app.getPath("userData"), "data");
@@ -98,6 +148,7 @@ function startBackend(): void {
   ];
   const packagedAgentPath = packagedAgentCandidates.find((candidate) => executableFileExists(candidate));
   const env = {
+    ...loadEnvFiles(),
     ...process.env,
     APP_AUTH_SECRET,
     AGENT_PORT: backendPort(),
@@ -106,7 +157,7 @@ function startBackend(): void {
   };
 
   if (app.isPackaged && packagedAgentPath) {
-    backendProcess = spawn(packagedAgentPath, [], { env });
+    backendProcess = spawn(packagedAgentPath, [], { detached: process.platform !== "win32", env });
   } else {
     const pythonCmd = process.platform === "win32" ? "python" : "python3";
     // packaged 模式下使用 app.getAppPath() 避免 ASAR 虚拟路径传给 spawn cwd
@@ -115,6 +166,7 @@ function startBackend(): void {
       : path.resolve(__dirname, "..");
     backendProcess = spawn(pythonCmd, ["-m", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", backendPort()], {
       cwd: projectRoot,
+      detached: process.platform !== "win32",
       env,
     });
   }
@@ -127,6 +179,36 @@ function startBackend(): void {
   backendProcess.on("exit", () => {
     backendProcess = null;
   });
+}
+
+function stopBackend(): void {
+  const processToStop = backendProcess;
+  if (!processToStop?.pid) return;
+  const pid = processToStop.pid;
+  backendProcess = null;
+
+  if (process.platform === "win32") {
+    spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+    return;
+  }
+
+  try {
+    process.kill(-pid, "SIGTERM");
+  } catch {
+    try {
+      processToStop.kill("SIGTERM");
+    } catch {
+      return;
+    }
+  }
+
+  setTimeout(() => {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      // Process tree already exited.
+    }
+  }, BACKEND_SHUTDOWN_GRACE_MS).unref();
 }
 
 function registerPackagedFrontendProtocol(): void {
@@ -155,10 +237,12 @@ function registerPackagedFrontendProtocol(): void {
 async function prepareBackend(): Promise<void> {
   if (backendStartPromise) return backendStartPromise;
   backendStartPromise = (async () => {
-    if (await backendIsReady()) return;
     const port = await findAvailablePort();
     backendUrl = `http://127.0.0.1:${port}`;
     startBackend();
+    void waitForBackendReady().catch((error) => {
+      console.error("[backend] readiness check failed", error);
+    });
   })();
   return backendStartPromise;
 }
@@ -204,7 +288,7 @@ app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
+  app.quit();
 });
 
 app.on("activate", () => {
@@ -216,5 +300,9 @@ app.on("activate", () => {
 });
 
 app.on("before-quit", () => {
-  backendProcess?.kill();
+  stopBackend();
+});
+
+app.on("will-quit", () => {
+  stopBackend();
 });

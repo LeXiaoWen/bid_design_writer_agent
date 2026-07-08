@@ -1,14 +1,16 @@
 import io
+import asyncio
 import zipfile
 
 import pytest
 from docx import Document
 
-from backend.schemas import ApiConfig
+from backend.schemas import ApiConfig, WebSearchConfig
 from backend.services.artifacts import build_output_files, extract_section, infer_project_name, make_zip
 from backend.services.document_parser import parse_document
 from backend.services.llm import create_agent
 from backend.services.skill_loader import build_stage1_instructions, build_stage2_instructions, skill_source_label
+from backend.services.web_search import WebSearchNotConfiguredError, build_search_context, tavily_search
 
 
 def make_docx_bytes(text: str) -> bytes:
@@ -136,3 +138,61 @@ def test_skill_loader_reads_all_supported_templates(monkeypatch):
     assert "12 章设计标模板参考" in build_stage2_instructions("auto")
     assert "用户选择的模板参考" in build_stage2_instructions("12-chapter")
     assert "用户选择的模板参考" in build_stage2_instructions("5-chapter")
+
+
+def test_tavily_search_requires_api_key(monkeypatch):
+    monkeypatch.setattr("backend.services.web_search.workbench_store.resolve_tavily_api_key", lambda: None)
+    monkeypatch.setattr("backend.services.web_search.workbench_store.get_web_search_config", lambda: WebSearchConfig())
+
+    with pytest.raises(WebSearchNotConfiguredError, match="TAVILY_API_KEY"):
+        asyncio.run(tavily_search("AI workbench"))
+
+
+def test_tavily_search_calls_api_and_builds_context(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "results": [
+                    {"title": "Result A", "url": "https://example.com/a", "content": "A summary"},
+                    {"title": "Result B", "url": "https://example.com/b", "content": "B summary"},
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, timeout):
+            assert timeout == 20
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, endpoint, headers, json):
+            captured["endpoint"] = endpoint
+            captured["headers"] = headers
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr("backend.services.web_search.workbench_store.resolve_tavily_api_key", lambda: "test-key")
+    monkeypatch.setattr(
+        "backend.services.web_search.workbench_store.get_web_search_config",
+        lambda: WebSearchConfig(has_key=True, max_results=2, search_depth="basic"),
+    )
+    monkeypatch.setattr("backend.services.web_search.httpx.AsyncClient", FakeClient)
+
+    results = asyncio.run(tavily_search("AI workbench"))
+    context = build_search_context(results)
+
+    assert captured["endpoint"] == "https://api.tavily.com/search"
+    assert captured["headers"]["Authorization"] == "Bearer test-key"
+    assert captured["json"]["query"] == "AI workbench"
+    assert captured["json"]["max_results"] == 2
+    assert results[0].title == "Result A"
+    assert "[1] Result A" in context
+    assert "https://example.com/b" in context

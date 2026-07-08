@@ -224,6 +224,29 @@ class ProviderProfileUpdate(BaseModel):
     api_key: Optional[str] = None
 
 
+class WebSearchConfig(BaseModel):
+    provider: str = "tavily"
+    has_key: bool = False
+    max_results: int = 5
+    search_depth: str = "basic"
+
+
+class WebSearchConfigUpdate(BaseModel):
+    api_key: Optional[str] = None
+    max_results: Optional[int] = Field(default=None, ge=1, le=10)
+    search_depth: Optional[str] = None
+
+    @field_validator("search_depth")
+    @classmethod
+    def validate_search_depth(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        depth = value.strip()
+        if depth not in {"basic", "advanced"}:
+            raise ValueError("search_depth 只能是 basic 或 advanced。")
+        return depth
+
+
 class ChatStreamRequest(BaseModel):
     conversation_id: Optional[str] = None
     project_id: Optional[str] = None
@@ -232,6 +255,7 @@ class ChatStreamRequest(BaseModel):
     api_key: Optional[str] = None
     message: str
     system_prompt: Optional[str] = None
+    web_search_enabled: bool = False
 
 
 class SearchResult(BaseModel):
