@@ -1018,6 +1018,11 @@ textarea:focus {
 }
 
 .access-button {
+  color: #535b62;
+  font-weight: 720;
+}
+
+.access-button.configured {
   color: var(--accent);
   font-weight: 760;
 }
@@ -1095,12 +1100,21 @@ textarea:focus {
   color: var(--accent);
 }
 
+.web-search-toggle.disabled {
+  color: #bcc3ca;
+  cursor: not-allowed;
+}
+
 .web-search-toggle:hover {
   color: #20262b;
 }
 
 .web-search-toggle.active:hover {
   color: var(--accent);
+}
+
+.web-search-toggle.disabled:hover {
+  color: #bcc3ca;
 }
 
 .upload-progress {

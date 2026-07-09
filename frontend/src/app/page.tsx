@@ -302,6 +302,12 @@ export default function Home() {
   }, [currentProfileId]);
 
   useEffect(() => {
+    if (webSearchConfig?.has_key === false && webSearchEnabled) {
+      setWebSearchEnabled(false);
+    }
+  }, [webSearchConfig?.has_key, webSearchEnabled]);
+
+  useEffect(() => {
     const trimmed = searchQuery.trim();
     if (!trimmed) {
       setSearchResults([]);
@@ -996,17 +1002,33 @@ export default function Home() {
             </div>
           </div>
         )}
-        <button type="button" className="access-button" onClick={openConfigPanel}>
+        <button
+          type="button"
+          className={currentProfile?.model ? "access-button configured" : "access-button"}
+          onClick={openConfigPanel}
+        >
           <ShieldCheck size={18} />
-          <span>{currentProfileId ? "模型已配置" : "配置模型"}</span>
+          <span>{currentProfile?.model ? "模型已配置" : "配置模型"}</span>
           <ChevronRight size={16} />
         </button>
         <button
           type="button"
-          className={webSearchEnabled ? "web-search-toggle active" : "web-search-toggle"}
-          onClick={() => setWebSearchEnabled((current) => !current)}
+          className={
+            webSearchConfig?.has_key === false
+              ? "web-search-toggle disabled"
+              : webSearchEnabled
+                ? "web-search-toggle active"
+                : "web-search-toggle"
+          }
+          onClick={() => {
+            if (webSearchConfig?.has_key === false) {
+              setError("请先在模型配置中填写 Tavily API key。");
+              return;
+            }
+            setWebSearchEnabled((current) => !current);
+          }}
           aria-pressed={webSearchEnabled}
-          title="使用 Tavily 联网搜索"
+          title={webSearchConfig?.has_key === false ? "请先配置 Tavily API key" : "使用 Tavily 联网搜索"}
         >
           <Globe2 size={17} />
           <span>联网搜索</span>
