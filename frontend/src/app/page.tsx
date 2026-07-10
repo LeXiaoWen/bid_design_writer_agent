@@ -19,8 +19,9 @@ import {
   ShieldCheck,
   Square,
   Trash2,
+  X,
 } from "lucide-react";
-import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, CSSProperties, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   changePassword,
@@ -185,6 +186,8 @@ function avatarContent(value: string) {
 
 export default function Home() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(300);
+  const [isResizingSidebar, setIsResizingSidebar] = useState(false);
   const [projects, setProjects] = useState<WorkbenchProject[]>([]);
   const [projectConversations, setProjectConversations] = useState<WorkbenchConversation[]>([]);
   const [recentConversations, setRecentConversations] = useState<WorkbenchConversation[]>([]);
@@ -210,6 +213,7 @@ export default function Home() {
   const [providerModels, setProviderModels] = useState<ProviderModel[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [projectsOpen, setProjectsOpen] = useState(true);
+  const [projectConversationsOpen, setProjectConversationsOpen] = useState(true);
   const [conversationsOpen, setConversationsOpen] = useState(true);
   const [profileForm, setProfileForm] = useState(providerPresets[0]);
   const [apiKey, setApiKey] = useState("");
@@ -244,6 +248,37 @@ export default function Home() {
   useEffect(() => {
     void initializeAuth();
   }, []);
+
+  useEffect(() => {
+    const savedWidth = Number(window.localStorage.getItem("bid-writer-sidebar-width"));
+    if (Number.isFinite(savedWidth) && savedWidth >= 250 && savedWidth <= 440) {
+      setSidebarWidth(savedWidth);
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem("bid-writer-sidebar-width", String(sidebarWidth));
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    if (!isResizingSidebar) return;
+
+    const resizeSidebar = (event: PointerEvent) => {
+      setSidebarWidth(Math.min(440, Math.max(250, event.clientX)));
+    };
+    const stopResizing = () => setIsResizingSidebar(false);
+
+    document.addEventListener("pointermove", resizeSidebar);
+    document.addEventListener("pointerup", stopResizing);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    return () => {
+      document.removeEventListener("pointermove", resizeSidebar);
+      document.removeEventListener("pointerup", stopResizing);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+  }, [isResizingSidebar]);
 
   useEffect(() => {
     setUserChatAvatar(window.localStorage.getItem("bid-writer-user-avatar") || "我");
@@ -384,6 +419,7 @@ export default function Home() {
 
   async function switchProject(project: WorkbenchProject) {
     setCurrentProjectId(project.id);
+    setProjectConversationsOpen(true);
     setMessages([]);
     setCurrentConversationId(null);
     setActiveBidWorkflow(null);
@@ -808,6 +844,7 @@ export default function Home() {
 
   function openConfigPanel() {
     setSidebarCollapsed(false);
+    setSidebarWidth((current) => Math.max(current, 320));
     setConfigOpen(true);
     setUserPanelOpen(false);
     setModelMenuOpen(false);
@@ -1233,7 +1270,11 @@ export default function Home() {
   }
 
   return (
-    <main className="workbench-shell" data-sidebar={sidebarCollapsed ? "collapsed" : "expanded"}>
+    <main
+      className="workbench-shell"
+      data-sidebar={sidebarCollapsed ? "collapsed" : "expanded"}
+      style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
+    >
       <aside className="sidebar">
         <div className="sidebar-top">
           {!sidebarCollapsed && <div className="app-mark">建筑设计标书方案助手</div>}
@@ -1258,105 +1299,110 @@ export default function Home() {
         </div>
 
         {configOpen && !sidebarCollapsed && (
-          <section className="config-panel">
-            <form className="config-section" onSubmit={saveProfile}>
-              <div className="config-section-title">模型配置</div>
-              <div className="config-grid">
-                <label>
-                  Provider
-                  <select value={profileForm.provider} onChange={(event) => choosePreset(event.target.value)}>
-                    {providerPresets.map((preset) => (
-                      <option key={preset.provider}>{preset.provider}</option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  显示名称
-                  <input value={profileForm.display_name} onChange={(event) => setProfileForm({ ...profileForm, display_name: event.target.value })} />
-                </label>
-                <label>
-                  Base URL
-                  <input value={profileForm.base_url} onChange={(event) => setProfileForm({ ...profileForm, base_url: event.target.value })} />
-                </label>
-                <label>
-                  Model
-                  <input value={profileForm.model} onChange={(event) => setProfileForm({ ...profileForm, model: event.target.value })} />
-                </label>
-                <label className="api-key-field">
-                  API key
-                  <input value={apiKey} type="password" onChange={(event) => setApiKey(event.target.value)} placeholder="保存到本地数据库" />
-                </label>
+          <section className="config-panel" aria-label="模型与工具配置">
+            <div className="config-panel-header">
+              <div>
+                <strong>模型与工具配置</strong>
+                <span>模型 API 和联网搜索仅保存在本机</span>
               </div>
-              <div className="config-actions">
-                <button type="button" onClick={() => setConfigOpen(false)}>
-                  关闭
-                </button>
-                <button type="submit">保存模型</button>
-              </div>
-            </form>
-
-            <form className="config-section" onSubmit={saveWebSearchConfig}>
-              <div className="config-section-title">
-                <span>联网搜索</span>
-                <em>
-                  {webSearchConfig?.source === "db"
-                    ? "已配置（本地）"
-                    : webSearchConfig?.source === "env"
-                      ? "已配置（环境变量）"
-                      : "未配置"}
-                </em>
-              </div>
-              {webSearchConfig?.source === "env" && (
-                <div className="config-message">
-                  当前 key 来自环境变量（.env 文件），优先级低于本地保存的 key。在下方填写新 key 保存后将覆盖。
+              <button type="button" onClick={() => setConfigOpen(false)} aria-label="关闭模型配置">
+                <X size={17} />
+              </button>
+            </div>
+            <div className="config-panel-scroll">
+              <form className="config-section" onSubmit={saveProfile}>
+                <div className="config-section-title">模型配置</div>
+                <div className="config-grid">
+                  <label>
+                    Provider
+                    <select value={profileForm.provider} onChange={(event) => choosePreset(event.target.value)}>
+                      {providerPresets.map((preset) => (
+                        <option key={preset.provider}>{preset.provider}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    显示名称
+                    <input value={profileForm.display_name} onChange={(event) => setProfileForm({ ...profileForm, display_name: event.target.value })} />
+                  </label>
+                  <label>
+                    Base URL
+                    <input value={profileForm.base_url} onChange={(event) => setProfileForm({ ...profileForm, base_url: event.target.value })} />
+                  </label>
+                  <label>
+                    Model
+                    <input value={profileForm.model} onChange={(event) => setProfileForm({ ...profileForm, model: event.target.value })} />
+                  </label>
+                  <label className="api-key-field">
+                    API key
+                    <input value={apiKey} type="password" onChange={(event) => setApiKey(event.target.value)} placeholder="保存到本地数据库" />
+                  </label>
                 </div>
-              )}
-              <div className="config-grid">
-                <label className="api-key-field">
-                  Tavily API key
-                  <input
-                    value={webSearchForm.api_key}
-                    type="password"
-                    onChange={(event) => setWebSearchForm({ ...webSearchForm, api_key: event.target.value })}
-                    placeholder={
-                      webSearchConfig?.source === "db"
-                        ? "留空则保留现有 key"
-                        : webSearchConfig?.source === "env"
-                          ? "填写后保存到本地（替代环境变量）"
-                          : "填写 Tavily API key"
-                    }
-                    disabled={webSearchSaveState === "saving"}
-                  />
-                </label>
-                <label>
-                  结果数量
-                  <input
-                    value={webSearchForm.max_results}
-                    type="number"
-                    min={1}
-                    max={10}
-                    onChange={(event) => setWebSearchForm({ ...webSearchForm, max_results: event.target.value })}
-                    disabled={webSearchSaveState === "saving"}
-                  />
-                </label>
-                <label>
-                  搜索深度
-                  <select value={webSearchForm.search_depth} onChange={(event) => setWebSearchForm({ ...webSearchForm, search_depth: event.target.value })} disabled={webSearchSaveState === "saving"}>
-                    <option value="basic">basic</option>
-                    <option value="advanced">advanced</option>
-                  </select>
-                </label>
-              </div>
-              {webSearchSaveMessage && <div className={webSearchSaveState === "error" ? "config-message error" : "config-message"}>{webSearchSaveMessage}</div>}
-              <div className="config-actions">
-                <button type="button" onClick={() => setConfigOpen(false)}>
-                  关闭
-                </button>
-                <button type="submit" disabled={webSearchSaveState === "saving"}>
-                  {webSearchSaveState === "saving" ? "保存中" : "保存搜索"}
-                </button>
-              </div>
-            </form>
+                <div className="config-actions">
+                  <button type="submit">保存模型</button>
+                </div>
+              </form>
+
+              <form className="config-section" onSubmit={saveWebSearchConfig}>
+                <div className="config-section-title">
+                  <span>联网搜索</span>
+                  <em>
+                    {webSearchConfig?.source === "db"
+                      ? "已配置（本地）"
+                      : webSearchConfig?.source === "env"
+                        ? "已配置（环境变量）"
+                        : "未配置"}
+                  </em>
+                </div>
+                {webSearchConfig?.source === "env" && (
+                  <div className="config-message">
+                    当前 key 来自环境变量（.env 文件），优先级低于本地保存的 key。在下方填写新 key 保存后将覆盖。
+                  </div>
+                )}
+                <div className="config-grid">
+                  <label className="api-key-field">
+                    Tavily API key
+                    <input
+                      value={webSearchForm.api_key}
+                      type="password"
+                      onChange={(event) => setWebSearchForm({ ...webSearchForm, api_key: event.target.value })}
+                      placeholder={
+                        webSearchConfig?.source === "db"
+                          ? "留空则保留现有 key"
+                          : webSearchConfig?.source === "env"
+                            ? "填写后保存到本地（替代环境变量）"
+                            : "填写 Tavily API key"
+                      }
+                      disabled={webSearchSaveState === "saving"}
+                    />
+                  </label>
+                  <label>
+                    结果数量
+                    <input
+                      value={webSearchForm.max_results}
+                      type="number"
+                      min={1}
+                      max={10}
+                      onChange={(event) => setWebSearchForm({ ...webSearchForm, max_results: event.target.value })}
+                      disabled={webSearchSaveState === "saving"}
+                    />
+                  </label>
+                  <label>
+                    搜索深度
+                    <select value={webSearchForm.search_depth} onChange={(event) => setWebSearchForm({ ...webSearchForm, search_depth: event.target.value })} disabled={webSearchSaveState === "saving"}>
+                      <option value="basic">basic</option>
+                      <option value="advanced">advanced</option>
+                    </select>
+                  </label>
+                </div>
+                {webSearchSaveMessage && <div className={webSearchSaveState === "error" ? "config-message error" : "config-message"}>{webSearchSaveMessage}</div>}
+                <div className="config-actions">
+                  <button type="submit" disabled={webSearchSaveState === "saving"}>
+                    {webSearchSaveState === "saving" ? "保存中" : "保存搜索"}
+                  </button>
+                </div>
+              </form>
+            </div>
           </section>
         )}
 
@@ -1393,7 +1439,7 @@ export default function Home() {
               )}
               {projects.map((project) => (
                 <div className="project-group" key={project.id}>
-                  <div className={project.id === currentProjectId ? "sidebar-item-shell active" : "sidebar-item-shell"}>
+                  <div className={project.id === currentProjectId ? "sidebar-item-shell project-shell active" : "sidebar-item-shell"}>
                     <button
                       className="project-row"
                       onClick={() => switchProject(project)}
@@ -1402,6 +1448,16 @@ export default function Home() {
                       <FileText size={18} />
                       {!sidebarCollapsed && <span>{project.title}</span>}
                     </button>
+                    {!sidebarCollapsed && project.id === currentProjectId && (
+                      <button
+                        type="button"
+                        className="project-expand-toggle"
+                        onClick={() => setProjectConversationsOpen((current) => !current)}
+                        aria-label={projectConversationsOpen ? `收起 ${project.title} 的对话` : `展开 ${project.title} 的对话`}
+                      >
+                        <ChevronRight className={projectConversationsOpen ? "chevron open" : "chevron"} size={15} />
+                      </button>
+                    )}
                     {!sidebarCollapsed && (
                       <button type="button" className="row-delete" onClick={() => removeProject(project)} aria-label={`删除项目 ${project.title}`}>
                         <Trash2 size={14} />
@@ -1410,6 +1466,7 @@ export default function Home() {
                   </div>
                   {!sidebarCollapsed &&
                     project.id === currentProjectId &&
+                    projectConversationsOpen &&
                     projectPreviewConversations.map((conversation) => (
                       <div className={conversation.id === currentConversationId ? "sidebar-item-shell project-chat-shell active" : "sidebar-item-shell project-chat-shell"} key={conversation.id}>
                         <button className="project-chat-row" onClick={() => openConversation(conversation.id)} title={conversation.title}>
@@ -1534,6 +1591,29 @@ export default function Home() {
           )}
           {!sidebarCollapsed && <ChevronRight className={userPanelOpen ? "chevron open" : "chevron"} size={16} />}
         </button>
+        {!sidebarCollapsed && (
+          <div
+            className="sidebar-resize-handle"
+            role="separator"
+            aria-label="调整侧边栏宽度"
+            aria-orientation="vertical"
+            tabIndex={0}
+            onPointerDown={(event) => {
+              event.preventDefault();
+              setIsResizingSidebar(true);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowLeft") {
+                event.preventDefault();
+                setSidebarWidth((current) => Math.max(250, current - 16));
+              }
+              if (event.key === "ArrowRight") {
+                event.preventDefault();
+                setSidebarWidth((current) => Math.min(440, current + 16));
+              }
+            }}
+          />
+        )}
       </aside>
 
       <section className="chat-workspace">
