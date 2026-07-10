@@ -95,6 +95,9 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     throw localBackendConnectionError();
   }
   if (!response.ok) {
+    if (response.status === 401 && authToken && !path.startsWith("/api/v1/auth/")) {
+      window.dispatchEvent(new Event("ai-workbench-auth-expired"));
+    }
     let detail = `请求失败：${response.status}`;
     try {
       const payload = await response.json();
@@ -131,8 +134,8 @@ export function getAuthStatus(): Promise<AuthStatus> {
   return quickRequest<AuthStatus>("/api/v1/auth/status");
 }
 
-export function setupAuth(input: { username: string; password: string }): Promise<AuthLoginResponse> {
-  return request<AuthLoginResponse>("/api/v1/auth/setup", {
+export function registerAuth(input: { username: string; password: string }): Promise<AuthLoginResponse> {
+  return request<AuthLoginResponse>("/api/v1/auth/register", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),

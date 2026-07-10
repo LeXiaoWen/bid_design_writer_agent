@@ -53,7 +53,7 @@ import {
   searchWorkbench,
   setApiBaseUrl,
   setAuthContext,
-  setupAuth,
+  registerAuth,
   streamChat,
   updateProviderProfile,
   updateWebSearchConfig,
@@ -75,14 +75,14 @@ import { applyChatStreamEvent } from "@/lib/chatReducer";
 
 const providerPresets = [
   { provider: "OpenAI", display_name: "OpenAI", base_url: "https://api.openai.com/v1", model: "gpt-4o" },
-  { provider: "DeepSeek", display_name: "DeepSeek", base_url: "https://api.deepseek.com", model: "deepseek-chat" },
+  { provider: "DeepSeek", display_name: "DeepSeek", base_url: "https://api.deepseek.com", model: "deepseek-v4-flash" },
   { provider: "通义千问 DashScope", display_name: "通义千问", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus" },
   { provider: "SiliconFlow", display_name: "SiliconFlow", base_url: "https://api.siliconflow.cn/v1", model: "deepseek-ai/DeepSeek-V3" },
   { provider: "OpenRouter", display_name: "OpenRouter", base_url: "https://openrouter.ai/api/v1", model: "openai/gpt-4o-mini" },
   { provider: "自定义", display_name: "自定义", base_url: "", model: "" },
 ];
 
-type AuthMode = "setup" | "login" | "ready";
+type AuthMode = "register" | "login" | "ready";
 
 const emptyAuthForm = {
   username: "",
@@ -238,15 +238,30 @@ export default function Home() {
     () => [...projectConversations, ...recentConversations].find((conversation) => conversation.id === currentConversationId) ?? null,
     [projectConversations, recentConversations, currentConversationId],
   );
-  const projectPreviewConversations = useMemo(() => projectConversations.slice(0, PROJECT_PREVIEW_CONVERSATION_LIMIT), [projectConversations]);
+  const defaultProject = useMemo(
+    () => projects.find((project) => !project.workspace_path && project.title === "默认项目") ?? projects.find((project) => !project.workspace_path) ?? null,
+    [projects],
+  );
+  const projectPreviewConversations = useMemo(
+    () => (currentProject?.workspace_path ? projectConversations.slice(0, PROJECT_PREVIEW_CONVERSATION_LIMIT) : []),
+    [currentProject?.workspace_path, projectConversations],
+  );
   const sidebarHistoryConversations = useMemo(() => {
-    const previewIds = new Set(projectPreviewConversations.map((conversation) => conversation.id));
-    return recentConversations.filter((conversation) => !previewIds.has(conversation.id));
-  }, [projectPreviewConversations, recentConversations]);
+    return recentConversations.filter((conversation) => conversation.project_id === defaultProject?.id);
+  }, [defaultProject?.id, recentConversations]);
   const currentProfile = useMemo(() => profiles.find((profile) => profile.id === currentProfileId) ?? null, [profiles, currentProfileId]);
 
   useEffect(() => {
     void initializeAuth();
+  }, []);
+
+  useEffect(() => {
+    const handleAuthExpired = () => {
+      void logoutUser();
+      setError("登录会话已失效，请重新登录。");
+    };
+    window.addEventListener("ai-workbench-auth-expired", handleAuthExpired);
+    return () => window.removeEventListener("ai-workbench-auth-expired", handleAuthExpired);
   }, []);
 
   useEffect(() => {
@@ -297,10 +312,6 @@ export default function Home() {
       const status = await getAuthStatusWithRetry();
       setAuthBackendReady(true);
       setError(null);
-      if (status.setup_required) {
-        setAuthMode("setup");
-        return;
-      }
       if (status.authenticated && savedToken) {
         const user = await getMe();
         setAuthUser(user);
@@ -315,7 +326,7 @@ export default function Home() {
     }
   }
 
-  function switchAuthMode(nextMode: "login" | "setup") {
+  function switchAuthMode(nextMode: "login" | "register") {
     setAuthMode(nextMode);
     setAuthForm(emptyAuthForm);
     setError(null);
@@ -390,15 +401,16 @@ export default function Home() {
         max_results: String(nextWebSearchConfig.max_results),
         search_depth: nextWebSearchConfig.search_depth,
       });
-      setCurrentProjectId(nextProjects[0]?.id ?? null);
+      const initialProject = nextProjects.find((project) => !project.workspace_path && project.title === "默认项目") ?? nextProjects.find((project) => !project.workspace_path) ?? nextProjects[0];
+      setCurrentProjectId(initialProject?.id ?? null);
       setCurrentProfileId(nextProfiles[0]?.id ?? null);
       const [nextProjectConversations, nextRecentConversations] = await Promise.all([
-        nextProjects[0]?.id ? listConversations(nextProjects[0].id) : Promise.resolve([]),
+        initialProject?.id ? listConversations(initialProject.id) : Promise.resolve([]),
         listConversations(),
       ]);
       setProjectConversations(nextProjectConversations);
       setRecentConversations(nextRecentConversations);
-      const firstConversation = nextProjectConversations[0] ?? nextRecentConversations[0];
+      const firstConversation = nextRecentConversations.find((conversation) => conversation.project_id === initialProject?.id) ?? nextProjectConversations[0];
       if (firstConversation) {
         await openConversation(firstConversation.id);
       }
@@ -474,7 +486,8 @@ export default function Home() {
     try {
       await deleteProject(project.id);
       const nextProjects = await listProjects();
-      const nextProjectId = project.id === currentProjectId ? nextProjects[0]?.id ?? null : currentProjectId;
+      const nextDefaultProject = nextProjects.find((item) => !item.workspace_path && item.title === "默认项目") ?? nextProjects.find((item) => !item.workspace_path);
+      const nextProjectId = project.id === currentProjectId ? nextDefaultProject?.id ?? nextProjects[0]?.id ?? null : currentProjectId;
       setProjects(nextProjects);
       setCurrentProjectId(nextProjectId);
       await refreshConversations(nextProjectId);
@@ -508,16 +521,16 @@ export default function Home() {
   async function startNewChat() {
     setError(null);
     try {
+      const latestProjects = projects.length > 0 ? projects : await listProjects();
+      const targetProject = latestProjects.find((project) => !project.workspace_path && project.title === "默认项目") ?? latestProjects.find((project) => !project.workspace_path);
       const conversation = await createConversation({
-        project_id: currentProjectId ?? undefined,
+        project_id: targetProject?.id,
         title: "新对话",
         provider_profile_id: currentProfileId ?? undefined,
         model: currentProfile?.model,
       });
-      if (!currentProjectId || conversation.project_id !== currentProjectId) {
-        setProjects(await listProjects());
-        setCurrentProjectId(conversation.project_id);
-      }
+      setProjects(await listProjects());
+      setCurrentProjectId(conversation.project_id);
       setCurrentConversationId(conversation.id);
       setMessages([]);
       setActiveBidWorkflow(null);
@@ -893,14 +906,14 @@ export default function Home() {
       setError("请输入用户名和密码。");
       return;
     }
-    if (authMode === "setup" && authForm.password !== authForm.confirmPassword) {
+    if (authMode === "register" && authForm.password !== authForm.confirmPassword) {
       setError("两次输入的密码不一致。");
       return;
     }
     try {
       const response =
-        authMode === "setup"
-          ? await setupAuth({ username, password: authForm.password })
+        authMode === "register"
+          ? await registerAuth({ username, password: authForm.password })
           : await loginAuth({ username, password: authForm.password });
       await completeAuthSession(response.token);
     } catch (caught) {
@@ -946,6 +959,9 @@ export default function Home() {
     setRecentConversations([]);
     setMessages([]);
     setProfiles([]);
+    setWebSearchConfig(null);
+    setWebSearchForm({ api_key: "", max_results: "5", search_depth: "basic" });
+    setWebSearchEnabled(false);
     setCurrentProjectId(null);
     setCurrentConversationId(null);
     setCurrentProfileId(null);
@@ -1220,13 +1236,13 @@ export default function Home() {
         <section className="auth-panel">
           <div className="auth-heading">
             <span>建筑设计标书方案助手</span>
-            <h1>{authMode === "setup" ? "注册" : "登录"}</h1>
+            <h1>{authMode === "register" ? "注册" : "登录"}</h1>
           </div>
           <div className="auth-tabs" role="tablist" aria-label="账号入口">
             <button type="button" className={authMode === "login" ? "active" : ""} onClick={() => switchAuthMode("login")}>
               登录
             </button>
-            <button type="button" className={authMode === "setup" ? "active" : ""} onClick={() => switchAuthMode("setup")}>
+            <button type="button" className={authMode === "register" ? "active" : ""} onClick={() => switchAuthMode("register")}>
               注册
             </button>
           </div>
@@ -1241,10 +1257,10 @@ export default function Home() {
                 value={authForm.password}
                 type="password"
                 onChange={(event) => setAuthForm({ ...authForm, password: event.target.value })}
-                autoComplete={authMode === "setup" ? "new-password" : "current-password"}
+                autoComplete={authMode === "register" ? "new-password" : "current-password"}
               />
             </label>
-            {authMode === "setup" && (
+            {authMode === "register" && (
               <label>
                 确认密码
                 <input
@@ -1255,7 +1271,7 @@ export default function Home() {
                 />
               </label>
             )}
-            <button type="submit">{authMode === "setup" ? "注册并进入" : "登录"}</button>
+            <button type="submit">{authMode === "register" ? "注册并进入" : "登录"}</button>
           </form>
           {!authBackendReady && (
             <div className="auth-status">
@@ -1335,7 +1351,7 @@ export default function Home() {
                   </label>
                   <label className="api-key-field">
                     API key
-                    <input value={apiKey} type="password" onChange={(event) => setApiKey(event.target.value)} placeholder="保存到本地数据库" />
+                    <input value={apiKey} type="password" onChange={(event) => setApiKey(event.target.value)} placeholder="保存到当前账号本地数据库" />
                   </label>
                 </div>
                 <div className="config-actions">
@@ -1448,7 +1464,7 @@ export default function Home() {
                       <FileText size={18} />
                       {!sidebarCollapsed && <span>{project.title}</span>}
                     </button>
-                    {!sidebarCollapsed && project.id === currentProjectId && (
+                    {!sidebarCollapsed && project.workspace_path && project.id === currentProjectId && (
                       <button
                         type="button"
                         className="project-expand-toggle"
@@ -1464,7 +1480,8 @@ export default function Home() {
                       </button>
                     )}
                   </div>
-                  {!sidebarCollapsed &&
+                    {!sidebarCollapsed &&
+                    project.workspace_path &&
                     project.id === currentProjectId &&
                     projectConversationsOpen &&
                     projectPreviewConversations.map((conversation) => (
@@ -1530,7 +1547,7 @@ export default function Home() {
               </div>
               <div className="user-detail">
                 <span>数据范围</span>
-                <strong>本机单用户数据</strong>
+                <strong>当前账号独立数据</strong>
               </div>
               <div className="avatar-settings">
                 <label>

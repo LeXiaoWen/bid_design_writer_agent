@@ -17,8 +17,8 @@ def behavior_report_root() -> Path:
     return root
 
 
-def behavior_report_path(workflow_id: str) -> Path:
-    return behavior_report_root() / workflow_id / REPORT_FILENAME
+def behavior_report_path(user_id: str, workflow_id: str) -> Path:
+    return behavior_report_root() / user_id / workflow_id / REPORT_FILENAME
 
 
 def redact_sensitive(text: str) -> str:
@@ -150,12 +150,12 @@ def build_behavior_report(
     )
 
 
-def save_behavior_report(workflow_id: str) -> Path:
-    workflow = workbench_store.get_bid_workflow(workflow_id)
-    artifact_files = workbench_store.get_bid_artifact_files(workflow.id)
-    messages = workbench_store.list_messages(workflow.conversation_id)
+def save_behavior_report(user_id: str, workflow_id: str) -> Path:
+    workflow = workbench_store.get_bid_workflow(user_id, workflow_id)
+    artifact_files = workbench_store.get_bid_artifact_files(user_id, workflow.id)
+    messages = workbench_store.list_messages(user_id, workflow.conversation_id)
     report = build_behavior_report(workflow, messages, artifact_files)
-    path = behavior_report_path(workflow.id)
+    path = behavior_report_path(user_id, workflow.id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(report, encoding="utf-8")
     return path

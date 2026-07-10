@@ -16,17 +16,18 @@ from .workbench_store import workbench_store
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-4o"
 
-_cancel_events: dict[str, asyncio.Event] = {}
+_cancel_events: dict[str, tuple[str, asyncio.Event]] = {}
 
 
 def sse_event(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-def cancel_run(run_id: str) -> bool:
-    event = _cancel_events.get(run_id)
-    if not event:
+def cancel_run(user_id: str, run_id: str) -> bool:
+    stored = _cancel_events.get(run_id)
+    if not stored or stored[0] != user_id:
         return False
+    event = stored[1]
     event.set()
     return True
 
@@ -36,20 +37,21 @@ def _normalize_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
     return [message for message in messages if message.get("role") in allowed_roles]
 
 
-async def stream_chat(request: ChatStreamRequest) -> AsyncIterator[str]:
-    profile = workbench_store.get_provider_profile(request.provider_profile_id) if request.provider_profile_id else None
+async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator[str]:
+    profile = workbench_store.get_provider_profile(user_id, request.provider_profile_id) if request.provider_profile_id else None
     model = request.model or (profile.model if profile else DEFAULT_MODEL)
     base_url = profile.base_url if profile else DEFAULT_BASE_URL
-    api_key = workbench_store.resolve_api_key(request.provider_profile_id, request.api_key)
+    api_key = workbench_store.resolve_api_key(user_id, request.provider_profile_id, request.api_key)
 
     if not api_key:
         yield sse_event("error", {"type": "missing_api_key", "message": "请先配置 API key。"})
         return
 
     if request.conversation_id:
-        conversation = workbench_store.get_conversation(request.conversation_id)
+        conversation = workbench_store.get_conversation(user_id, request.conversation_id)
     else:
         conversation = workbench_store.create_conversation(
+            user_id,
             WorkbenchConversationCreate(
                 project_id=request.project_id,
                 title=request.message.strip()[:32] or "新对话",
@@ -58,11 +60,11 @@ async def stream_chat(request: ChatStreamRequest) -> AsyncIterator[str]:
             )
         )
 
-    previous_messages = workbench_store.list_messages(conversation.id)
-    user_message = workbench_store.add_message(conversation.id, "user", request.message)
+    previous_messages = workbench_store.list_messages(user_id, conversation.id)
+    user_message = workbench_store.add_message(user_id, conversation.id, "user", request.message)
 
     # 若该对话存在标书工作流，用户每条消息都保存行为摘要
-    bid_workflows = workbench_store.list_bid_workflows(conversation.id)
+    bid_workflows = workbench_store.list_bid_workflows(user_id, conversation.id)
     active_workflow_ids = [
         wf.id
         for wf in bid_workflows
@@ -76,15 +78,15 @@ async def stream_chat(request: ChatStreamRequest) -> AsyncIterator[str]:
     ]
     if active_workflow_ids:
         try:
-            save_behavior_report(active_workflow_ids[0])
+            save_behavior_report(user_id, active_workflow_ids[0])
         except Exception as report_exc:
             print(f"[behavior-report] failed to save on chat for {active_workflow_ids[0]}: {report_exc}")
 
-    assistant_message = workbench_store.add_message(conversation.id, "assistant", "", status="streaming", model=model)
+    assistant_message = workbench_store.add_message(user_id, conversation.id, "assistant", "", status="streaming", model=model)
 
     run_id = str(uuid4())
     cancel_event = asyncio.Event()
-    _cancel_events[run_id] = cancel_event
+    _cancel_events[run_id] = (user_id, cancel_event)
 
     yield sse_event(
         "message_start",
@@ -112,7 +114,7 @@ async def stream_chat(request: ChatStreamRequest) -> AsyncIterator[str]:
         system_parts.append(request.system_prompt)
     if request.web_search_enabled:
         try:
-            search_results = await tavily_search(request.message)
+            search_results = await tavily_search(user_id, request.message)
             system_parts.append(build_search_context(search_results))
         except Exception as exc:
             message = str(exc)
@@ -145,7 +147,7 @@ async def stream_chat(request: ChatStreamRequest) -> AsyncIterator[str]:
         async for chunk in stream:
             if cancel_event.is_set():
                 final_content = "".join(content_parts)
-                workbench_store.update_message(assistant_message.id, final_content, "interrupted", finish_reason="cancelled")
+                workbench_store.update_message(user_id, assistant_message.id, final_content, "interrupted", finish_reason="cancelled")
                 yield sse_event(
                     "message_done",
                     {
@@ -172,7 +174,7 @@ async def stream_chat(request: ChatStreamRequest) -> AsyncIterator[str]:
             yield sse_event("delta", {"conversation_id": conversation.id, "message_id": assistant_message.id, "delta": delta})
 
         final_content = "".join(content_parts)
-        workbench_store.update_message(assistant_message.id, final_content, "completed", finish_reason=finish_reason, usage=usage)
+        workbench_store.update_message(user_id, assistant_message.id, final_content, "completed", finish_reason=finish_reason, usage=usage)
         yield sse_event(
             "message_done",
             {
@@ -187,7 +189,7 @@ async def stream_chat(request: ChatStreamRequest) -> AsyncIterator[str]:
     except Exception as exc:
         final_content = "".join(content_parts)
         message = str(exc)
-        workbench_store.update_message(assistant_message.id, final_content, "error", error=message)
+        workbench_store.update_message(user_id, assistant_message.id, final_content, "error", error=message)
         yield sse_event(
             "error",
             {

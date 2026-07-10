@@ -633,14 +633,19 @@ textarea:focus {
 .user-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
+  position: absolute;
+  z-index: 12;
+  right: 8px;
+  bottom: 70px;
+  left: 8px;
   gap: 9px;
-  flex: 0 1 auto;
   min-width: 0;
-  max-height: min(520px, calc(100vh - 190px));
+  height: min(520px, calc(100vh - 96px));
   overflow: hidden;
   border: 1px solid rgba(158, 168, 176, 0.22);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.48);
+  background: #f7fbfe;
+  box-shadow: 0 16px 38px rgba(72, 88, 99, 0.16);
   padding: 10px;
 }
 
@@ -1771,6 +1776,13 @@ textarea:focus {
 
   .config-panel {
     inset: 148px 6px 6px;
+  }
+
+  .user-panel {
+    right: 6px;
+    bottom: 66px;
+    left: 6px;
+    height: min(520px, calc(100vh - 82px));
   }
 
   .config-grid {

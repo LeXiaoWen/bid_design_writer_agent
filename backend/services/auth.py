@@ -56,7 +56,7 @@ def _clear_login_failures(username: str) -> None:
     _login_failures.pop(_login_key(username), None)
 
 
-def setup_user(username: str, password: str) -> AuthUser:
+def register_user(username: str, password: str) -> AuthUser:
     return workbench_store.create_user(username.strip(), _hasher.hash(password))
 
 

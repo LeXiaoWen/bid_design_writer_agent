@@ -6,9 +6,9 @@ from ..schemas import ProviderModel
 from .workbench_store import workbench_store
 
 
-async def list_provider_models(profile_id: str) -> list[ProviderModel]:
-    profile = workbench_store.get_provider_profile(profile_id)
-    api_key = workbench_store.resolve_api_key(profile_id)
+async def list_provider_models(user_id: str, profile_id: str) -> list[ProviderModel]:
+    profile = workbench_store.get_provider_profile(user_id, profile_id)
+    api_key = workbench_store.resolve_api_key(user_id, profile_id)
     if not api_key:
         raise ValueError("请先配置 API key。")
 

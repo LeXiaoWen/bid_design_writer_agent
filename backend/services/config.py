@@ -7,7 +7,7 @@ API_PRESETS = {
     "DeepSeek": {
         "provider": "DeepSeek",
         "base_url": "https://api.deepseek.com",
-        "model": "deepseek-chat",
+        "model": "deepseek-v4-flash",
     },
     "通义千问 DashScope": {
         "provider": "通义千问 DashScope",

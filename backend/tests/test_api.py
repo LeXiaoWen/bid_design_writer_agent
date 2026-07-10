@@ -1,5 +1,6 @@
 import io
 import os
+import sqlite3
 import tempfile
 import zipfile
 from pathlib import Path
@@ -15,19 +16,37 @@ os.environ["APP_AUTH_SECRET"] = "test-app-secret"
 from backend.main import app
 from backend.schemas import BidWorkflowStatus, ProviderModel
 from backend.services.behavior_report import REPORT_FILENAME, behavior_report_path, save_behavior_report
-from backend.services.workbench_store import workbench_store
+from backend.services.workbench_store import WorkbenchStore, workbench_store
 
 
 APP_SECRET_HEADERS = {"X-App-Auth-Secret": "test-app-secret"}
 client = TestClient(app)
-auth_response = client.post("/api/v1/auth/setup", headers=APP_SECRET_HEADERS, json={"username": "tester", "password": "test-password"})
+auth_response = client.post("/api/v1/auth/register", headers=APP_SECRET_HEADERS, json={"username": "tester", "password": "test-password"})
 assert auth_response.status_code == 200
+TEST_USER_ID = client.get("/api/v1/me", headers={"Authorization": f"Bearer {auth_response.json()['token']}", **APP_SECRET_HEADERS}).json()["id"]
 client.headers.update(
     {
         "Authorization": f"Bearer {auth_response.json()['token']}",
         "X-App-Auth-Secret": "test-app-secret",
     }
 )
+
+
+def register_tenant_client(username: str) -> tuple[TestClient, str]:
+    tenant_client = TestClient(app)
+    response = tenant_client.post(
+        "/api/v1/auth/register",
+        headers=APP_SECRET_HEADERS,
+        json={"username": username, "password": "test-password"},
+    )
+    assert response.status_code == 200
+    tenant_client.headers.update(
+        {
+            "Authorization": f"Bearer {response.json()['token']}",
+            "X-App-Auth-Secret": "test-app-secret",
+        }
+    )
+    return tenant_client, tenant_client.get("/api/v1/me").json()["id"]
 
 
 def test_health_identifies_ai_workbench_backend():
@@ -53,7 +72,7 @@ def test_v1_routes_require_app_secret_and_login():
 
     status = bare_client.get("/api/v1/auth/status", headers=APP_SECRET_HEADERS)
     assert status.status_code == 200
-    assert status.json()["setup_required"] is False
+    assert status.json()["registration_allowed"] is True
     assert status.json()["authenticated"] is False
 
 
@@ -201,6 +220,72 @@ def test_provider_profile_does_not_echo_api_key():
     assert any(profile["id"] == payload["id"] for profile in listed.json())
 
 
+def test_users_are_isolated_across_projects_conversations_workflows_and_configs(monkeypatch):
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    user_a, user_a_id = register_tenant_client(f"tenant-a-{uuid4()}")
+    user_b, _ = register_tenant_client(f"tenant-b-{uuid4()}")
+
+    project = user_a.post("/api/v1/projects", json={"title": "用户 A 私有项目"}).json()
+    conversation = user_a.post("/api/v1/conversations", json={"project_id": project["id"], "title": "用户 A 私有对话"}).json()
+    profile = user_a.post(
+        "/api/v1/provider-profiles",
+        json={
+            "provider": "OpenAI",
+            "display_name": "用户 A 私有模型",
+            "base_url": "https://api.openai.com/v1",
+            "model": "gpt-4o",
+            "api_key": "tenant-a-secret",
+        },
+    ).json()
+    workflow = user_a.post(
+        "/api/v1/bid-workflows",
+        data={"conversation_id": conversation["id"], "provider_profile_id": profile["id"]},
+        files={"file": ("a.txt", "用户 A 私有标书内容".encode("utf-8"), "text/plain")},
+    ).json()
+
+    assert user_b.get(f"/api/v1/projects/{project['id']}").status_code == 404
+    assert user_b.get(f"/api/v1/conversations/{conversation['id']}").status_code == 404
+    assert user_b.get(f"/api/v1/conversations/{conversation['id']}/messages").status_code == 404
+    assert user_b.delete(f"/api/v1/provider-profiles/{profile['id']}").status_code == 404
+    assert user_b.get(f"/api/v1/bid-workflows/{workflow['id']}").status_code == 404
+    assert user_b.get(f"/api/v1/bid-workflows/{workflow['id']}/artifacts").status_code == 404
+    assert all(item["id"] != project["id"] for item in user_b.get("/api/v1/projects").json())
+    assert all(item["conversation_id"] != conversation["id"] for item in user_b.get("/api/v1/search", params={"q": "私有标书"}).json())
+
+    user_a.patch("/api/v1/web-search-config", json={"api_key": "tvly-user-a", "max_results": 3})
+    assert user_a.get("/api/v1/web-search-config").json()["has_key"] is True
+    assert user_b.get("/api/v1/web-search-config").json()["has_key"] is False
+
+    row = workbench_store._execute("SELECT api_key FROM provider_profiles WHERE id = ?", (profile["id"],)).fetchone()
+    assert row["api_key"] == "tenant-a-secret"
+    assert workbench_store.resolve_api_key(user_a_id, profile["id"]) == "tenant-a-secret"
+
+
+def test_legacy_database_migrates_existing_data_to_its_only_user(tmp_path):
+    legacy_path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(legacy_path)
+    connection.executescript(
+        """
+        CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_login_at TEXT);
+        CREATE TABLE projects (id TEXT PRIMARY KEY, title TEXT NOT NULL, workspace_path TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE provider_profiles (id TEXT PRIMARY KEY, provider TEXT NOT NULL, display_name TEXT NOT NULL, base_url TEXT NOT NULL, model TEXT NOT NULL, credential_key TEXT NOT NULL UNIQUE, has_key INTEGER NOT NULL DEFAULT 0, api_key TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        INSERT INTO users VALUES ('legacy-user', 'legacy', 'hash', '2026-01-01', '2026-01-01', NULL);
+        INSERT INTO projects VALUES ('legacy-project', '历史项目', NULL, '2026-01-01', '2026-01-01');
+        INSERT INTO provider_profiles VALUES ('legacy-profile', 'OpenAI', '旧模型', 'https://api.openai.com/v1', 'gpt-4o', 'provider:legacy-profile', 1, 'legacy-secret', '2026-01-01', '2026-01-01');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    migrated = WorkbenchStore(legacy_path)
+    assert migrated.get_project("legacy-user", "legacy-project").title == "历史项目"
+    assert migrated.resolve_api_key("legacy-user", "legacy-profile") == "legacy-secret"
+    assert migrated._execute("SELECT api_key FROM provider_profiles WHERE id = 'legacy-profile'").fetchone()["api_key"] == "legacy-secret"
+    assert any(item.project_id == "legacy-project" for item in migrated.search("legacy-user", "历史项目"))
+    assert migrated.path.with_suffix(".db.pre-multitenant.bak").exists()
+    assert migrated._connection.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
 def test_web_search_config_does_not_echo_tavily_key():
     initial = client.get("/api/v1/web-search-config")
     assert initial.status_code == 200
@@ -232,7 +317,8 @@ def test_provider_models_can_be_listed(monkeypatch):
     )
     profile_id = created.json()["id"]
 
-    async def fake_fetch(profile_id_arg: str):
+    async def fake_fetch(user_id_arg: str, profile_id_arg: str):
+        assert user_id_arg == TEST_USER_ID
         assert profile_id_arg == profile_id
         return [
             ProviderModel(id="deepseek-chat", name="deepseek-chat"),
@@ -284,6 +370,7 @@ def test_bid_workflow_store_persists_state_and_artifacts():
     profile_id = created_profile.json()["id"]
 
     workflow = workbench_store.create_bid_workflow(
+        TEST_USER_ID,
         conversation_id=conversation_id,
         provider_profile_id=profile_id,
         file_name="招标文件.txt",
@@ -293,42 +380,44 @@ def test_bid_workflow_store_persists_state_and_artifacts():
     assert workflow.project_id == project_id
     assert workflow.status == BidWorkflowStatus.UPLOADED
     assert workflow.file_name == "招标文件.txt"
-    assert workbench_store.get_active_bid_workflow(conversation_id).id == workflow.id
+    assert workbench_store.get_active_bid_workflow(TEST_USER_ID, conversation_id).id == workflow.id
 
     with pytest.raises(ValueError, match="已有未完成"):
         workbench_store.create_bid_workflow(
+            TEST_USER_ID,
             conversation_id=conversation_id,
             provider_profile_id=profile_id,
             file_name="另一个招标文件.txt",
             file_text="项目名称：另一个项目",
         )
 
-    extracting = workbench_store.update_bid_workflow_status(workflow.id, BidWorkflowStatus.EXTRACTING)
+    extracting = workbench_store.update_bid_workflow_status(TEST_USER_ID, workflow.id, BidWorkflowStatus.EXTRACTING)
     assert extracting.status == BidWorkflowStatus.EXTRACTING
 
-    extracted = workbench_store.save_bid_extraction(workflow.id, "# 测试标书项目 — 招标文件信息提取")
+    extracted = workbench_store.save_bid_extraction(TEST_USER_ID, workflow.id, "# 测试标书项目 — 招标文件信息提取")
     assert extracted.status == BidWorkflowStatus.EXTRACTION_READY
     assert "信息提取" in extracted.extracted_markdown
 
-    confirmed = workbench_store.save_bid_confirmation(workflow.id, "确认，并补充企业优势。")
+    confirmed = workbench_store.save_bid_confirmation(TEST_USER_ID, workflow.id, "确认，并补充企业优势。")
     assert confirmed.confirmation_text == "确认，并补充企业优势。"
 
-    templated = workbench_store.save_bid_template_choice(workflow.id, "12-chapter")
+    templated = workbench_store.save_bid_template_choice(TEST_USER_ID, workflow.id, "12-chapter")
     assert templated.template_choice == "12-chapter"
 
     artifacts = workbench_store.save_bid_artifacts(
+        TEST_USER_ID,
         workflow.id,
         {
             "测试标书项目_招标文件信息提取.md": extracted.extracted_markdown,
             "测试标书项目_设计方案.md": "# 设计方案",
         },
     )
-    completed = workbench_store.get_bid_workflow(workflow.id)
+    completed = workbench_store.get_bid_workflow(TEST_USER_ID, workflow.id)
 
     assert completed.status == BidWorkflowStatus.COMPLETED
-    assert workbench_store.get_active_bid_workflow(conversation_id) is None
+    assert workbench_store.get_active_bid_workflow(TEST_USER_ID, conversation_id) is None
     assert [artifact.kind for artifact in artifacts] == ["extraction", "proposal"]
-    assert workbench_store.get_bid_artifact_content(workflow.id, "测试标书项目_设计方案.md") == "# 设计方案"
+    assert workbench_store.get_bid_artifact_content(TEST_USER_ID, workflow.id, "测试标书项目_设计方案.md") == "# 设计方案"
 
 
 def test_bid_workflow_v1_full_chain(monkeypatch):
@@ -421,7 +510,7 @@ def test_bid_workflow_v1_full_chain(monkeypatch):
     with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
         assert proposal["name"] in archive.namelist()
 
-    report_path = behavior_report_path(workflow_id)
+    report_path = behavior_report_path(TEST_USER_ID, workflow_id)
     assert report_path.exists()
     report = report_path.read_text(encoding="utf-8")
     assert "用户行为与需求摘要" in report
@@ -448,16 +537,18 @@ def _create_completed_bid_workflow() -> str:
         },
     )
     workflow = workbench_store.create_bid_workflow(
+        TEST_USER_ID,
         conversation_id=conversation_id,
         provider_profile_id=created_profile.json()["id"],
         file_name="行为摘要招标文件.txt",
         file_text="原始招标文件全文不应进入行为报告。项目名称：行为摘要测试项目。",
     )
-    workbench_store.add_message(conversation_id, "user", "请补充低碳策略，api_key=sk-1234567890abcdef")
-    workbench_store.save_bid_extraction(workflow.id, "# 行为摘要测试项目 — 招标文件信息提取")
-    workbench_store.save_bid_confirmation(workflow.id, "确认，并补充低碳策略。token=sk-1234567890abcdef")
-    workbench_store.save_bid_template_choice(workflow.id, "auto")
+    workbench_store.add_message(TEST_USER_ID, conversation_id, "user", "请补充低碳策略，api_key=sk-1234567890abcdef")
+    workbench_store.save_bid_extraction(TEST_USER_ID, workflow.id, "# 行为摘要测试项目 — 招标文件信息提取")
+    workbench_store.save_bid_confirmation(TEST_USER_ID, workflow.id, "确认，并补充低碳策略。token=sk-1234567890abcdef")
+    workbench_store.save_bid_template_choice(TEST_USER_ID, workflow.id, "auto")
     workbench_store.save_bid_artifacts(
+        TEST_USER_ID,
         workflow.id,
         {
             "行为摘要测试项目_招标文件信息提取.md": "# 信息提取",
@@ -469,8 +560,8 @@ def _create_completed_bid_workflow() -> str:
 
 def test_behavior_report_saves_markdown_locally_and_redacts_sensitive():
     workflow_id = _create_completed_bid_workflow()
-    path = save_behavior_report(workflow_id)
-    duplicate = save_behavior_report(workflow_id)
+    path = save_behavior_report(TEST_USER_ID, workflow_id)
+    duplicate = save_behavior_report(TEST_USER_ID, workflow_id)
 
     assert path == duplicate
     assert path.name == REPORT_FILENAME
@@ -499,43 +590,44 @@ def test_bid_workflow_cancel_prevents_late_extraction_save(monkeypatch):
         },
     )
     workflow = workbench_store.create_bid_workflow(
+        TEST_USER_ID,
         conversation_id=conversation_id,
         provider_profile_id=created_profile.json()["id"],
         file_name="取消阶段一.txt",
         file_text="项目名称：取消阶段一项目",
     )
-    workbench_store.update_bid_workflow_status(workflow.id, BidWorkflowStatus.EXTRACTING)
+    workbench_store.update_bid_workflow_status(TEST_USER_ID, workflow.id, BidWorkflowStatus.EXTRACTING)
 
     def fake_run_agent(api_config, instructions, prompt):
-        workbench_store.update_bid_workflow_status(workflow.id, BidWorkflowStatus.CANCELLED)
+        workbench_store.update_bid_workflow_status(TEST_USER_ID, workflow.id, BidWorkflowStatus.CANCELLED)
         return "# 迟到的阶段一结果"
 
     monkeypatch.setattr("backend.main.run_agent", fake_run_agent)
 
     from backend.main import run_bid_extraction_task
 
-    run_bid_extraction_task(workflow.id)
-    cancelled = workbench_store.get_bid_workflow(workflow.id)
+    run_bid_extraction_task(TEST_USER_ID, workflow.id)
+    cancelled = workbench_store.get_bid_workflow(TEST_USER_ID, workflow.id)
     assert cancelled.status == BidWorkflowStatus.CANCELLED
     assert cancelled.extracted_markdown == ""
 
 
 def test_bid_workflow_cancel_prevents_late_generation_save(monkeypatch):
     workflow_id = _create_completed_bid_workflow()
-    workbench_store.update_bid_workflow_status(workflow_id, BidWorkflowStatus.GENERATING)
+    workbench_store.update_bid_workflow_status(TEST_USER_ID, workflow_id, BidWorkflowStatus.GENERATING)
 
     def fake_run_agent(api_config, instructions, prompt):
-        workbench_store.update_bid_workflow_status(workflow_id, BidWorkflowStatus.CANCELLED)
+        workbench_store.update_bid_workflow_status(TEST_USER_ID, workflow_id, BidWorkflowStatus.CANCELLED)
         return "## 迟到的设计方案"
 
     monkeypatch.setattr("backend.main.run_agent", fake_run_agent)
 
     from backend.main import run_bid_generation_task
 
-    run_bid_generation_task(workflow_id)
-    cancelled = workbench_store.get_bid_workflow(workflow_id)
+    run_bid_generation_task(TEST_USER_ID, workflow_id)
+    cancelled = workbench_store.get_bid_workflow(TEST_USER_ID, workflow_id)
     assert cancelled.status == BidWorkflowStatus.CANCELLED
-    assert workbench_store.get_bid_artifact_content(workflow_id, "行为摘要测试项目_设计方案.md") == "# 设计方案"
+    assert workbench_store.get_bid_artifact_content(TEST_USER_ID, workflow_id, "行为摘要测试项目_设计方案.md") == "# 设计方案"
 
 
 def test_bid_workflow_cancel_endpoint_rejects_completed_workflow():
@@ -547,12 +639,13 @@ def test_bid_workflow_cancel_endpoint_rejects_completed_workflow():
 
 def test_bid_generation_behavior_report_failure_does_not_fail_workflow(monkeypatch):
     workflow_id = _create_completed_bid_workflow()
-    workbench_store.update_bid_workflow_status(workflow_id, BidWorkflowStatus.GENERATING)
+    workbench_store.update_bid_workflow_status(TEST_USER_ID, workflow_id, BidWorkflowStatus.GENERATING)
 
     def fake_run_agent(api_config, instructions, prompt):
         return "## 方案正文\n内容"
 
-    def fake_save_behavior_report(workflow_id_arg: str):
+    def fake_save_behavior_report(user_id_arg: str, workflow_id_arg: str):
+        assert user_id_arg == TEST_USER_ID
         assert workflow_id_arg == workflow_id
         raise RuntimeError("disk full")
 
@@ -561,8 +654,8 @@ def test_bid_generation_behavior_report_failure_does_not_fail_workflow(monkeypat
 
     from backend.main import run_bid_generation_task
 
-    run_bid_generation_task(workflow_id)
-    completed = workbench_store.get_bid_workflow(workflow_id)
+    run_bid_generation_task(TEST_USER_ID, workflow_id)
+    completed = workbench_store.get_bid_workflow(TEST_USER_ID, workflow_id)
     assert completed.status == BidWorkflowStatus.COMPLETED
     assert completed.error is None
 

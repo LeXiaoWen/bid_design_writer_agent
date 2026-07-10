@@ -80,24 +80,9 @@ class BidWorkflowGenerateRequest(BaseModel):
 
 
 class AuthStatus(BaseModel):
-    setup_required: bool
     authenticated: bool = False
     username: Optional[str] = None
-
-
-class AuthSetupRequest(BaseModel):
-    username: str = Field(min_length=1)
-    password: str = Field(min_length=6)
-
-    @field_validator("username")
-    @classmethod
-    def validate_username(cls, value: str) -> str:
-        username = value.strip()
-        if not username:
-            raise ValueError("用户名不能为空。")
-        if len(username) > 64:
-            raise ValueError("用户名不能超过 64 个字符。")
-        return username
+    registration_allowed: bool = True
 
 
 class AuthLoginRequest(BaseModel):
@@ -111,6 +96,10 @@ class AuthLoginRequest(BaseModel):
         if not username:
             raise ValueError("用户名不能为空。")
         return username
+
+
+class AuthRegisterRequest(AuthLoginRequest):
+    password: str = Field(min_length=6)
 
 
 class AuthLoginResponse(BaseModel):
@@ -193,7 +182,6 @@ class ProviderProfile(BaseModel):
     display_name: str
     base_url: str
     model: str
-    credential_key: str
     has_key: bool = False
     created_at: str
     updated_at: str

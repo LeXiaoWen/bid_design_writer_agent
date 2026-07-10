@@ -141,11 +141,11 @@ def test_skill_loader_reads_all_supported_templates(monkeypatch):
 
 
 def test_tavily_search_requires_api_key(monkeypatch):
-    monkeypatch.setattr("backend.services.web_search.workbench_store.resolve_tavily_api_key", lambda: None)
-    monkeypatch.setattr("backend.services.web_search.workbench_store.get_web_search_config", lambda: WebSearchConfig())
+    monkeypatch.setattr("backend.services.web_search.workbench_store.resolve_tavily_api_key", lambda user_id: None)
+    monkeypatch.setattr("backend.services.web_search.workbench_store.get_web_search_config", lambda user_id: WebSearchConfig())
 
     with pytest.raises(WebSearchNotConfiguredError, match="TAVILY_API_KEY"):
-        asyncio.run(tavily_search("AI workbench"))
+        asyncio.run(tavily_search("test-user", "AI workbench"))
 
 
 def test_tavily_search_calls_api_and_builds_context(monkeypatch):
@@ -179,14 +179,14 @@ def test_tavily_search_calls_api_and_builds_context(monkeypatch):
             captured["json"] = json
             return FakeResponse()
 
-    monkeypatch.setattr("backend.services.web_search.workbench_store.resolve_tavily_api_key", lambda: "test-key")
+    monkeypatch.setattr("backend.services.web_search.workbench_store.resolve_tavily_api_key", lambda user_id: "test-key")
     monkeypatch.setattr(
         "backend.services.web_search.workbench_store.get_web_search_config",
-        lambda: WebSearchConfig(has_key=True, source="db", max_results=2, search_depth="basic"),
+        lambda user_id: WebSearchConfig(has_key=True, source="db", max_results=2, search_depth="basic"),
     )
     monkeypatch.setattr("backend.services.web_search.httpx.AsyncClient", FakeClient)
 
-    results = asyncio.run(tavily_search("AI workbench"))
+    results = asyncio.run(tavily_search("test-user", "AI workbench"))
     context = build_search_context(results)
 
     assert captured["endpoint"] == "https://api.tavily.com/search"

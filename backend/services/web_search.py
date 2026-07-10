@@ -44,9 +44,9 @@ def _timeout_seconds() -> float:
     return float(DEFAULT_TIMEOUT_SECONDS)
 
 
-async def tavily_search(query: str) -> list[WebSearchResult]:
-    config = workbench_store.get_web_search_config()
-    api_key = workbench_store.resolve_tavily_api_key()
+async def tavily_search(user_id: str, query: str) -> list[WebSearchResult]:
+    config = workbench_store.get_web_search_config(user_id)
+    api_key = workbench_store.resolve_tavily_api_key(user_id)
     if not api_key:
         raise WebSearchNotConfiguredError("未配置 TAVILY_API_KEY，无法使用联网搜索。")
 

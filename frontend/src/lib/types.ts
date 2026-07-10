@@ -36,7 +36,6 @@ export type ProviderProfile = {
   display_name: string;
   base_url: string;
   model: string;
-  credential_key: string;
   has_key: boolean;
   created_at: string;
   updated_at: string;
@@ -111,9 +110,9 @@ export type HealthResponse = {
 };
 
 export type AuthStatus = {
-  setup_required: boolean;
   authenticated: boolean;
   username?: string | null;
+  registration_allowed: boolean;
 };
 
 export type AuthLoginResponse = {

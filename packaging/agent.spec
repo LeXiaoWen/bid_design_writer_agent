@@ -18,8 +18,6 @@ hiddenimports = [
 
 if sys.platform == "win32":
     hiddenimports.extend([
-        "keyring.backends.Windows",
-        "win32ctypes",
         "asyncio.windows_events",
         "selectors",
     ])
