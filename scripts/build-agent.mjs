@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,6 +8,7 @@ const projectRoot = resolve(scriptDir, "..");
 const venvDir = join(projectRoot, ".agent-venv");
 const requirementsFile = join(projectRoot, "backend", "requirements-agent.txt");
 const specFile = join(projectRoot, "packaging", "agent.spec");
+const agentOutputDir = join(projectRoot, ".agent-dist", "ai-workbench-agent");
 const pythonCandidates = process.platform === "win32" ? ["py", "python"] : ["python3", "python"];
 
 function run(command, args, options = {}) {
@@ -60,6 +61,7 @@ run(venvPython, ["-m", "pip", "install", "--upgrade", "pip"]);
 run(venvPython, ["-m", "pip", "install", "-r", requirementsFile]);
 
 console.log("Building packaged backend agent...");
+rmSync(agentOutputDir, { recursive: true, force: true });
 run(venvPython, [
   "-m",
   "PyInstaller",

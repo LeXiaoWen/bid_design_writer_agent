@@ -58,7 +58,7 @@
         "from": ".agent-dist",
         "to": "agent",
         "filter": [
-          "ai-workbench-agent*"
+          "ai-workbench-agent/**/*"
         ]
       }
     ],

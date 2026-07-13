@@ -58,6 +58,7 @@ def build_stage1_instructions() -> str:
 def build_stage2_instructions(template_choice: str) -> str:
     skill_md = load_skill_file("SKILL.md")
     proposal_format = load_skill_file("references/proposal-format.md")
+    reusable_modules = load_skill_file("references/可复用模块卡片.md")
     if template_choice == "auto":
         design_template = load_skill_file(f"references/{TEMPLATE_FILES['12-chapter']}")
         consulting_template = load_skill_file(f"references/{TEMPLATE_FILES['5-chapter']}")
@@ -90,6 +91,10 @@ def build_stage2_instructions(template_choice: str) -> str:
 以下为标书格式规范参考：
 
 {proposal_format}
+
+以下为可复用模块卡片。仅在满足卡片的适用条件、且不与 A/B 级项目事实冲突时调用；不得复用卡片中的不可迁移内容：
+
+{reusable_modules}
 
 当前运行在桌面应用中：
 - 不要声称已经调用本地 Write 工具保存文件，后端会生成可下载成果。

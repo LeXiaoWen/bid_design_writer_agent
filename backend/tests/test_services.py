@@ -1,6 +1,8 @@
 import io
 import asyncio
+import json
 import zipfile
+from pathlib import Path
 
 import pytest
 from docx import Document
@@ -104,6 +106,7 @@ def write_test_skill(root):
     (references / "proposal-format.md").write_text("外部格式规范", encoding="utf-8")
     (references / "设计标书大纲模板参考.md").write_text("外部 12 章模板", encoding="utf-8")
     (references / "设计标书大纲模板参考-全过程咨询标.md").write_text("外部 5 章模板", encoding="utf-8")
+    (references / "可复用模块卡片.md").write_text("外部可复用模块卡片", encoding="utf-8")
 
 
 def test_skill_loader_uses_bundled_skill_by_default(monkeypatch):
@@ -121,7 +124,9 @@ def test_skill_loader_accepts_explicit_external_override(tmp_path, monkeypatch):
 
     assert skill_source_label() == str(tmp_path)
     assert "外部测试 Skill" in build_stage1_instructions()
-    assert "外部 12 章模板" in build_stage2_instructions("12-chapter")
+    instructions = build_stage2_instructions("12-chapter")
+    assert "外部 12 章模板" in instructions
+    assert "外部可复用模块卡片" in instructions
 
 
 def test_skill_loader_invalid_external_override_does_not_fallback(tmp_path, monkeypatch):
@@ -138,6 +143,14 @@ def test_skill_loader_reads_all_supported_templates(monkeypatch):
     assert "12 章设计标模板参考" in build_stage2_instructions("auto")
     assert "用户选择的模板参考" in build_stage2_instructions("12-chapter")
     assert "用户选择的模板参考" in build_stage2_instructions("5-chapter")
+
+
+def test_bid_design_writer_regression_prompts_are_valid_json():
+    fixture = Path(__file__).parent / "fixtures" / "bid_design_writer_test_prompts.json"
+    prompts = json.loads(fixture.read_text(encoding="utf-8"))
+
+    assert prompts
+    assert all({"id", "prompt", "expected"} <= item.keys() for item in prompts)
 
 
 def test_tavily_search_requires_api_key(monkeypatch):

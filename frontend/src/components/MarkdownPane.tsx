@@ -2,6 +2,8 @@
 
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 
@@ -18,7 +20,7 @@ export function MarkdownPane({ content, empty }: MarkdownPaneProps) {
     <article className="markdown-pane markdown-body">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks]}
-        rehypePlugins={[rehypeHighlight]}
+        rehypePlugins={[rehypeRaw, rehypeSanitize, rehypeHighlight]}
         components={{
           table: ({ children }) => (
             <div className="markdown-table-wrap">
