@@ -343,7 +343,6 @@ export function confirmBidWorkflow(workflowId: string, text: string): Promise<Bi
 export function generateBidWorkflow(
   workflowId: string,
   input: {
-    template_choice: "auto" | "12-chapter" | "5-chapter" | string;
     extra_context?: string;
   },
 ): Promise<BidWorkflowActionResponse> {

@@ -166,12 +166,6 @@ def api_config_from_profile(user_id: str, provider_profile_id: str) -> ApiConfig
     return ApiConfig(provider=profile.provider, base_url=profile.base_url, api_key=api_key, model=profile.model)
 
 
-def template_display_name(template_choice: str) -> str:
-    if template_choice == "auto":
-        return "按招标文件自动判断目录结构"
-    return "12 章设计标模板" if template_choice == "12-chapter" else "5 章全过程咨询标模板"
-
-
 def public_bid_workflow(workflow: BidWorkflow) -> BidWorkflowPublic:
     return BidWorkflowPublic.model_validate(workflow.model_dump(exclude={"file_text"}))
 
@@ -217,12 +211,9 @@ def run_bid_generation_task(user_id: str, workflow_id: str) -> None:
             return
         if not workflow.extracted_markdown:
             raise ValueError("请先完成阶段一信息提取。")
-        if workflow.template_choice not in {"auto", "12-chapter", "5-chapter"}:
-            raise ValueError("模板选择无效，请使用 auto、12-chapter 或 5-chapter。")
-
         api_config = api_config_from_profile(user_id, workflow.provider_profile_id or "")
         prompt = f"""
-用户已确认阶段一提取结果，目录结构选择方式：{template_display_name(workflow.template_choice)}
+用户已确认阶段一提取结果。请仅按当前招标范围、评分、成果和格式要求动态编排目录，不使用预设模板。
 
 用户确认/补充信息：
 {workflow.confirmation_text or "确认无补充。"}
@@ -230,9 +221,9 @@ def run_bid_generation_task(user_id: str, workflow_id: str) -> None:
 阶段一提取结果：
 {workflow.extracted_markdown}
 
-请执行阶段二：生成完整设计方案、绘图提示词 + 专业图纸需求清单、标书制作规范汇总。
+请执行阶段二：生成当前建筑设计范围内的完整方案。图文需求、制作规范汇总和其他附表仅在当前招标文件或已确认资料实际触发时输出。
 """
-        result = run_agent(api_config, build_stage2_instructions(workflow.template_choice), prompt)
+        result = run_agent(api_config, build_stage2_instructions(), prompt)
         if workflow_is_cancelled(user_id, workflow_id):
             return
         files = build_output_files(workflow.extracted_markdown, result)
@@ -552,15 +543,13 @@ def generate_bid_workflow(workflow_id: str, request: Request, payload: BidWorkfl
             raise ValueError("请先完成阶段一信息提取。")
         if not workflow.confirmation_text:
             raise ValueError("请先确认阶段一信息。")
-        if payload.template_choice not in {"auto", "12-chapter", "5-chapter"}:
-            raise ValueError("模板选择无效，请使用 auto、12-chapter 或 5-chapter。")
         if workflow.status in {BidWorkflowStatus.EXTRACTING, BidWorkflowStatus.GENERATING}:
             raise ValueError("当前工作流正在执行中。")
         confirmation_text = workflow.confirmation_text
         if payload.extra_context:
             confirmation_text = f"{confirmation_text}\n\n补充信息：{payload.extra_context}"
         workbench_store.save_bid_confirmation(user_id, workflow_id, confirmation_text)
-        workbench_store.save_bid_template_choice(user_id, workflow_id, payload.template_choice)
+        workbench_store.save_bid_template_choice(user_id, workflow_id, "auto")
         if payload.extra_context:
             try:
                 save_behavior_report(user_id, workflow_id)
@@ -572,7 +561,7 @@ def generate_bid_workflow(workflow_id: str, request: Request, payload: BidWorkfl
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    workbench_store.add_message(user_id, workflow.conversation_id, "assistant", f"正在执行阶段二设计方案生成，模板：{template_display_name(payload.template_choice)}。")
+    workbench_store.add_message(user_id, workflow.conversation_id, "assistant", "正在按当前招标约束动态生成阶段二设计方案。")
     background_tasks.add_task(run_bid_generation_task, user_id, workflow_id)
     return BidWorkflowActionResponse(workflow=public_bid_workflow(workflow), message="阶段二设计方案生成已开始。")
 

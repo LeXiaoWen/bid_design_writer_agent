@@ -31,11 +31,6 @@ API_PRESETS = {
     },
 }
 
-TEMPLATE_FILES = {
-    "12-chapter": "设计标书大纲模板参考.md",
-    "5-chapter": "设计标书大纲模板参考-全过程咨询标.md",
-}
-
 STAGE_LABELS = {
     "init": "等待上传",
     "uploaded": "已上传",

@@ -2,8 +2,6 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
-from .config import TEMPLATE_FILES
-
 BUNDLED_SKILL_NAME = "bid_design_writer"
 BUNDLED_SKILL_DISPLAY = f"bundled:{BUNDLED_SKILL_NAME}"
 
@@ -40,13 +38,8 @@ def load_skill_file(relative_path: str) -> str:
 
 def build_stage1_instructions() -> str:
     skill_md = load_skill_file("SKILL.md")
-    checklist = load_skill_file("references/extraction-checklist.md")
     return f"""
 {skill_md}
-
-以下为阶段一补充提取清单：
-
-{checklist}
 
 当前运行在桌面应用中：
 - 不要声称已经调用本地 Write 工具保存文件，后端会生成可下载成果。
@@ -55,50 +48,18 @@ def build_stage1_instructions() -> str:
 """
 
 
-def build_stage2_instructions(template_choice: str) -> str:
+def build_stage2_instructions() -> str:
     skill_md = load_skill_file("SKILL.md")
-    proposal_format = load_skill_file("references/proposal-format.md")
     reusable_modules = load_skill_file("references/可复用模块卡片.md")
-    if template_choice == "auto":
-        design_template = load_skill_file(f"references/{TEMPLATE_FILES['12-chapter']}")
-        consulting_template = load_skill_file(f"references/{TEMPLATE_FILES['5-chapter']}")
-        template_section = f"""
-以下为可参考的通用模板。请先根据阶段一提取结果判断：
-- 如果招标文件明确规定目录结构，必须严格按招标文件目录组织，不使用通用模板替代。
-- 如果招标文件未明确目录，纯设计标参考 12 章设计标模板；全过程咨询标参考 5 章全过程咨询标模板。
-- 如果项目不是建筑工程类，应根据评分项和招标要求自定义目录，不机械套用 12 章或 5 章。
-
-【12 章设计标模板参考】
-{design_template}
-
-【5 章全过程咨询标模板参考】
-{consulting_template}
-"""
-    elif template_choice in TEMPLATE_FILES:
-        template = load_skill_file(f"references/{TEMPLATE_FILES[template_choice]}")
-        template_section = f"""
-以下为用户选择的模板参考：
-
-{template}
-"""
-    else:
-        raise ValueError("模板选择无效，请使用 auto、12-chapter 或 5-chapter。")
     return f"""
 {skill_md}
 
-{template_section}
-
-以下为标书格式规范参考：
-
-{proposal_format}
-
-以下为可复用模块卡片。仅在满足卡片的适用条件、且不与 A/B 级项目事实冲突时调用；不得复用卡片中的不可迁移内容：
+以下为候选模块卡片。它们不是默认目录、图纸清单或承诺来源；仅在当前招标条款、当前项目资料和责任边界同时匹配时调用其中的去项目化方法：
 
 {reusable_modules}
 
 当前运行在桌面应用中：
 - 不要声称已经调用本地 Write 工具保存文件，后端会生成可下载成果。
 - 输出必须使用 Markdown。
-- 先输出章节级内容大纲，再输出正文。
-- 单独保留“绘图提示词 + 专业图纸需求清单”章节，方便生成下载文件。
+- 按当前招标约束动态编排，不使用预设章节模板；未被当前条款触发的图文、附表和文件不得输出。
 """

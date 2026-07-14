@@ -92,7 +92,7 @@ TAVILY_SEARCH_DEPTH=basic
 BID_DESIGN_WRITER_SKILL_DIR=
 ```
 
-`BID_DESIGN_WRITER_SKILL_DIR` 设置后会强制使用外部目录；目录必须包含 `SKILL.md` 及 `references/` 下的提取清单、格式规范、两类大纲模板和可复用模块卡片。缺少文件时后端会报错而不会回退到内置版本。修改内置 skill 后需要重新打包。
+`BID_DESIGN_WRITER_SKILL_DIR` 设置后会强制使用外部目录；目录必须包含 `SKILL.md` 和 `references/可复用模块卡片.md`。缺少运行所需文件时后端会报错而不会回退到内置版本。修改内置 skill 后需要重新打包。
 
 ## 打包
 

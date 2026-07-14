@@ -77,11 +77,7 @@ def _issue_messages(messages: list[WorkbenchMessage]) -> list[str]:
 
 
 def _template_display(template_choice: str | None) -> str:
-    if template_choice == "12-chapter":
-        return "12 章设计标模板"
-    if template_choice == "5-chapter":
-        return "5 章全过程咨询标模板"
-    return "按招标文件自动判断目录结构"
+    return "按当前招标约束动态编排"
 
 
 def build_behavior_report(

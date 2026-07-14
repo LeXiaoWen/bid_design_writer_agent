@@ -8,7 +8,7 @@ import pytest
 from docx import Document
 
 from backend.schemas import ApiConfig, WebSearchConfig
-from backend.services.artifacts import build_output_files, extract_section, infer_project_name, make_zip
+from backend.services.artifacts import build_output_files, extract_section, has_confirmed_content, infer_project_name, make_zip
 from backend.services.document_parser import parse_document
 from backend.services.llm import create_agent
 from backend.services.skill_loader import build_stage1_instructions, build_stage2_instructions, skill_source_label
@@ -72,16 +72,21 @@ def test_extract_section_keeps_child_headings():
     assert "标书制作规范" not in section
 
 
-def test_drawing_artifact_has_fallback_content():
+def test_artifacts_omit_untriggered_optional_files():
     files = build_output_files(
         "项目名称：测试项目\n项目概况：公共建筑\n设计范围：方案设计\n成果提交：总平面图、效果图、分析图",
         "## 方案正文\n功能分区、交通组织、景观节点设计。",
     )
-    drawing = files["测试项目_绘图提示词_图纸需求清单.md"]
-    assert "模型未单独输出" not in drawing
-    assert "专业图纸需求清单" in drawing
-    assert "总平面设计图" in drawing
-    assert "成果提交：总平面图、效果图、分析图" in drawing
+    assert set(files) == {"测试项目_招标文件信息提取.md", "测试项目_设计方案.md"}
+
+
+def test_unmentioned_specification_section_does_not_create_artifact():
+    files = build_output_files(
+        "项目名称：测试项目\n## 四、标书制作规范\n- 装订方式：未提及\n- 封面格式：未提及",
+        "## 方案正文\n内容",
+    )
+    assert not has_confirmed_content("## 四、标书制作规范\n- 装订方式：未提及")
+    assert "测试项目_标书制作规范.md" not in files
 
 
 def test_openai_compatible_agent_accepts_base_url():
@@ -102,10 +107,6 @@ def write_test_skill(root):
     references = root / "references"
     references.mkdir()
     (root / "SKILL.md").write_text("# 外部测试 Skill\n", encoding="utf-8")
-    (references / "extraction-checklist.md").write_text("外部阶段一清单", encoding="utf-8")
-    (references / "proposal-format.md").write_text("外部格式规范", encoding="utf-8")
-    (references / "设计标书大纲模板参考.md").write_text("外部 12 章模板", encoding="utf-8")
-    (references / "设计标书大纲模板参考-全过程咨询标.md").write_text("外部 5 章模板", encoding="utf-8")
     (references / "可复用模块卡片.md").write_text("外部可复用模块卡片", encoding="utf-8")
 
 
@@ -115,7 +116,6 @@ def test_skill_loader_uses_bundled_skill_by_default(monkeypatch):
     assert skill_source_label() == "bundled:bid_design_writer"
     instructions = build_stage1_instructions()
     assert "招标设计方案编写助手" in instructions
-    assert "阶段一补充提取清单" in instructions
 
 
 def test_skill_loader_accepts_explicit_external_override(tmp_path, monkeypatch):
@@ -124,8 +124,7 @@ def test_skill_loader_accepts_explicit_external_override(tmp_path, monkeypatch):
 
     assert skill_source_label() == str(tmp_path)
     assert "外部测试 Skill" in build_stage1_instructions()
-    instructions = build_stage2_instructions("12-chapter")
-    assert "外部 12 章模板" in instructions
+    instructions = build_stage2_instructions()
     assert "外部可复用模块卡片" in instructions
 
 
@@ -137,12 +136,12 @@ def test_skill_loader_invalid_external_override_does_not_fallback(tmp_path, monk
         build_stage1_instructions()
 
 
-def test_skill_loader_reads_all_supported_templates(monkeypatch):
+def test_skill_loader_uses_dynamic_stage2_instructions(monkeypatch):
     monkeypatch.delenv("BID_DESIGN_WRITER_SKILL_DIR", raising=False)
 
-    assert "12 章设计标模板参考" in build_stage2_instructions("auto")
-    assert "用户选择的模板参考" in build_stage2_instructions("12-chapter")
-    assert "用户选择的模板参考" in build_stage2_instructions("5-chapter")
+    instructions = build_stage2_instructions()
+    assert "候选模块卡片" in instructions
+    assert "12 章设计标模板参考" not in instructions
 
 
 def test_bid_design_writer_regression_prompts_are_valid_json():

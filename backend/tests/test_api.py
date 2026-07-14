@@ -481,7 +481,7 @@ def test_bid_workflow_v1_full_chain(monkeypatch):
 
     generate = client.post(
         f"/api/v1/bid-workflows/{workflow_id}/generate",
-        json={"template_choice": "auto", "extra_context": "采用低碳设计策略。"},
+        json={"extra_context": "采用低碳设计策略。"},
     )
     assert generate.status_code == 200
 

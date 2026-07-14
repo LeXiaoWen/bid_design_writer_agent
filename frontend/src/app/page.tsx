@@ -704,7 +704,6 @@ export default function Home() {
     setError(null);
     try {
       const response = await generateBidWorkflow(activeBidWorkflow.id, {
-        template_choice: "auto",
         extra_context: bidExtraContext.trim() || undefined,
       });
       setActiveBidWorkflow(response.workflow);
@@ -722,7 +721,6 @@ export default function Home() {
     try {
       const response = activeBidWorkflow.extracted_markdown
         ? await generateBidWorkflow(activeBidWorkflow.id, {
-            template_choice: "auto",
             extra_context: bidExtraContext.trim() || undefined,
           })
         : await extractBidWorkflow(activeBidWorkflow.id);
@@ -777,8 +775,8 @@ export default function Home() {
     const ext = artifactName.includes(".") ? artifactName.slice(artifactName.lastIndexOf(".")) : ".md";
     const suffix = artifactName.includes("信息提取")
       ? "招标文件信息提取"
-      : artifactName.includes("绘图") || artifactName.includes("图纸")
-        ? "绘图提示词_图纸需求清单"
+      : artifactName.includes("绘图") || artifactName.includes("图纸") || artifactName.includes("图文证据")
+        ? "图文证据与图纸需求"
         : artifactName.includes("规范")
           ? "标书制作规范"
           : "设计方案";
@@ -1165,7 +1163,7 @@ export default function Home() {
 
         {activeBidWorkflow.confirmation_text && !["completed", "cancelled"].includes(activeBidWorkflow.status) && (
           <div className="workflow-actions">
-            <div className="workflow-note">目录结构将根据招标文件实际要求自动判断；有明确目录时按招标文件，没有明确目录时再参考通用模板。</div>
+            <div className="workflow-note">目录结构将按当前招标范围、评分、成果和格式要求动态编排，不套用固定模板。</div>
             <label>
               补充信息
               <textarea

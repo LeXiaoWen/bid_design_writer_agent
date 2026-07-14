@@ -75,7 +75,6 @@ class BidWorkflowConfirmRequest(BaseModel):
 
 
 class BidWorkflowGenerateRequest(BaseModel):
-    template_choice: str = "auto"
     extra_context: Optional[str] = None
 
 

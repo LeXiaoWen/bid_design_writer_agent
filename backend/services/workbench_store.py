@@ -1124,7 +1124,7 @@ class WorkbenchStore:
             return "extraction"
         if "设计方案" in name:
             return "proposal"
-        if "绘图提示词" in name:
+        if "绘图提示词" in name or "图文证据" in name:
             return "drawing"
         if "标书制作规范" in name:
             return "spec"
