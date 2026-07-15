@@ -55,6 +55,34 @@
 
 ## 开发
 
+### 国内网络环境模板
+
+国内网络环境可先配置 npm 缓存与 Electron 下载镜像，再安装依赖和执行打包。配置只影响本机开发环境，不会写入应用或提交到仓库。
+
+macOS / Linux：
+
+```bash
+npm config set registry https://registry.npmmirror.com --global
+npm config set cache "$HOME/.npm-cache" --global
+
+# 可加入 ~/.zshrc 或 ~/.bashrc，使安装 Electron 和 electron-builder 时使用镜像
+export ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"
+export ELECTRON_BUILDER_BINARIES_MIRROR="https://registry.npmmirror.com/-/binary/electron-builder-binaries/"
+```
+
+Windows PowerShell：
+
+```powershell
+npm config set registry https://registry.npmmirror.com --global
+npm config set cache "D:\\npm-cache" --global
+
+# 写入当前用户环境变量；重新打开终端后生效
+[Environment]::SetEnvironmentVariable("ELECTRON_MIRROR", "https://npmmirror.com/mirrors/electron/", "User")
+[Environment]::SetEnvironmentVariable("ELECTRON_BUILDER_BINARIES_MIRROR", "https://registry.npmmirror.com/-/binary/electron-builder-binaries/", "User")
+```
+
+若镜像不可用，可删除上述 Electron 环境变量并执行 `npm config delete registry --global`，恢复 npm 官方源。Electron 官方支持通过 `ELECTRON_MIRROR` 指定二进制下载镜像。
+
 ### 安装依赖
 
 ```bash
