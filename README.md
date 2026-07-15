@@ -145,9 +145,35 @@ packaging/icons/icon.ico   # Windows
 
 未签名的 macOS 应用首次打开可能需要在 Finder 中右键选择“打开”。正式对外发布还需要 Apple 签名与公证；Windows 正式发布建议配置代码签名以减少 SmartScreen 拦截。
 
+## 版本与发布
+
+根目录 `package.json` 的 `version` 是唯一发布版本源：Electron 应用元数据、安装包文件名和后端 `/health` 返回值均以它为准。前端 `package.json` 与两个 lockfile 由 `npm run sync:version` 自动同步，不能单独修改版本。
+
+版本采用 SemVer：修复使用 `patch`，新增兼容功能使用 `minor`，不兼容变更使用 `major`。发布时在目标平台完成构建：
+
+```bash
+# 以 0.1.0 -> 0.1.1 为例；不会自动提交或创建 tag
+npm version patch --no-git-tag-version
+npm run sync:version
+npm run check:version
+
+npm run test:backend
+npm run test:frontend
+npm run typecheck
+npm run dist:mac  # Windows 平台改为 npm run dist:win
+
+git add package.json package-lock.json frontend/package.json frontend/package-lock.json backend/
+git commit -m "chore(release): v0.1.1"
+git tag v0.1.1
+git push origin main --follow-tags
+```
+
+每次 `pack` 或 `dist` 会自动执行版本同步。现有 `v1.0` Git tag 早于该约定且与当前应用版本不一致，保留为历史记录；后续 tag 必须与根版本完全一致，例如 `v0.1.1`。
+
 ## 验证
 
 ```bash
+npm run check:version
 npm run test:backend
 npm run test:frontend
 npm run typecheck

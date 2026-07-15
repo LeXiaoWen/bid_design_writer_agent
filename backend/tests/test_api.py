@@ -16,6 +16,7 @@ os.environ["APP_AUTH_SECRET"] = "test-app-secret"
 from backend.main import app
 from backend.schemas import BidWorkflowStatus, ProviderModel
 from backend.services.behavior_report import REPORT_FILENAME, behavior_report_path, save_behavior_report
+from backend.services.app_version import get_app_version
 from backend.services.workbench_store import WorkbenchStore, workbench_store
 
 
@@ -55,6 +56,7 @@ def test_health_identifies_ai_workbench_backend():
     payload = response.json()
     assert payload["ok"] is True
     assert payload["app"] == "ai-workbench-desktop"
+    assert payload["version"] == get_app_version()
     assert "database" in payload
     assert "presets" in payload
 

@@ -28,6 +28,10 @@ a = Analysis(
     binaries=[],
     datas=[
         (
+            str(project_root / "package.json"),
+            "build",
+        ),
+        (
             str(project_root / "backend" / "bundled_skills"),
             "backend/bundled_skills",
         ),

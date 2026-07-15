@@ -35,6 +35,7 @@ from .schemas import (
     WebSearchConfigUpdate,
 )
 from .services.artifacts import build_output_files, make_zip
+from .services.app_version import get_app_version
 from .services.auth import AuthRateLimitError, change_password, login_user, logout_token, register_user, user_from_token
 from .services.behavior_report import save_behavior_report
 from .services.config import API_PRESETS
@@ -244,7 +245,7 @@ def health():
     return {
         "ok": True,
         "app": "ai-workbench-desktop",
-        "version": "0.1.0",
+        "version": get_app_version(),
         "skill_dir": skill_source_label(),
         "database": str(db_path()),
         "presets": API_PRESETS,

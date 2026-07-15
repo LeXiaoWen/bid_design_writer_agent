@@ -86,6 +86,7 @@ try {
     builderArgs.push("--config", tempConfig);
   }
 
+  run(process.execPath, ["scripts/sync-version.mjs"]);
   run(command("npm"), ["run", "build"]);
   run(command("npm"), ["run", "build:agent"]);
   run(process.execPath, ["scripts/run-electron-builder.mjs", ...builderArgs]);
