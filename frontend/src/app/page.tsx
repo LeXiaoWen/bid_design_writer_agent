@@ -54,12 +54,12 @@ import {
   setApiBaseUrl,
   setAuthContext,
   registerAuth,
-  streamChat,
   updateProviderProfile,
   updateWebSearchConfig,
 } from "@/lib/api";
 import { MarkdownPane } from "@/components/MarkdownPane";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { useChatStream } from "@/hooks/useChatStream";
 import type {
   AuthUser,
   BidWorkflow,
@@ -206,7 +206,7 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
-  const [isStreaming, setIsStreaming] = useState(false);
+  const { isStreaming, send: sendChatStream, abort: abortChatStream } = useChatStream();
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
@@ -599,10 +599,8 @@ export default function Home() {
     const conversationId = await ensureConversation(text);
     setInput("");
     setMessages((current) => [...current, localMessage("user", text, "completed")]);
-    setIsStreaming(true);
-
     try {
-      await streamChat(
+      await sendChatStream(
         {
           conversation_id: conversationId,
           project_id: currentProjectId ?? undefined,
@@ -616,7 +614,6 @@ export default function Home() {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
-      setIsStreaming(false);
       setActiveRunId(null);
     }
   }
@@ -652,6 +649,7 @@ export default function Home() {
   }
 
   async function stopStreaming() {
+    abortChatStream();
     if (!activeRunId) return;
     await cancelChat(activeRunId);
   }

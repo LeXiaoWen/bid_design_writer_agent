@@ -381,22 +381,6 @@ export async function downloadBidZip(workflowId: string): Promise<Blob> {
   return response.blob();
 }
 
-export function parseSseChunk(chunk: string): ChatStreamEvent[] {
-  return chunk
-    .split("\n\n")
-    .map((block) => block.trim())
-    .filter(Boolean)
-    .map((block) => {
-      const eventLine = block.split("\n").find((line) => line.startsWith("event:"));
-      const dataLine = block.split("\n").find((line) => line.startsWith("data:"));
-      if (!eventLine || !dataLine) return null;
-      const event = eventLine.replace("event:", "").trim() as ChatStreamEvent["event"];
-      const data = JSON.parse(dataLine.replace("data:", "").trim());
-      return { event, data } as ChatStreamEvent;
-    })
-    .filter((event): event is ChatStreamEvent => event !== null);
-}
-
 export async function streamChat(
   input: {
     conversation_id?: string;
@@ -409,46 +393,51 @@ export async function streamChat(
     web_search_enabled?: boolean;
   },
   onEvent: (event: ChatStreamEvent) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const response = await fetchWithLocalRetry(`${apiBaseUrl}/api/v1/chat/stream`, {
-    ...withAuthHeaders({
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-    }),
-  });
-
-  if (!response.ok || !response.body) {
-    let detail = `请求失败：${response.status}`;
-    try {
-      const payload = await response.json();
-      detail = payload.detail ?? detail;
-    } catch {
-      // Keep status fallback.
-    }
-    throw new Error(detail);
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() ?? "";
-    for (const part of parts) {
-      for (const event of parseSseChunk(`${part}\n\n`)) {
-        onEvent(event);
-      }
-    }
-  }
-
-  if (buffer.trim()) {
-    for (const event of parseSseChunk(buffer)) {
-      onEvent(event);
-    }
+  try {
+    const requestOptions = withAuthHeaders({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    await fetchEventSource(`${apiBaseUrl}/api/v1/chat/stream`, {
+      method: "POST",
+      headers: Object.fromEntries(new Headers(requestOptions.headers).entries()),
+      body: requestOptions.body as string,
+      signal,
+      openWhenHidden: true,
+      async onopen(response) {
+        if (response.ok && response.headers.get("content-type")?.includes("text/event-stream")) return;
+        if (response.status === 401 && authToken) {
+          window.dispatchEvent(new Event("ai-workbench-auth-expired"));
+        }
+        let detail = `请求失败：${response.status}`;
+        try {
+          const payload = await response.json();
+          detail = payload.detail ?? detail;
+        } catch {
+          // Keep the HTTP fallback if an upstream response has no JSON body.
+        }
+        throw new Error(detail);
+      },
+      onmessage(message) {
+        if (!message.event || !message.data) return;
+        try {
+          onEvent({ event: message.event as ChatStreamEvent["event"], data: JSON.parse(message.data) } as ChatStreamEvent);
+        } catch {
+          throw new Error("本地后端返回了无法识别的流式消息。" );
+        }
+      },
+      onerror(error) {
+        // Re-throwing disables the library's automatic reconnect: replaying a POST could bill the LLM twice.
+        throw error;
+      },
+    });
+  } catch (error) {
+    if (signal?.aborted) return;
+    if (error instanceof Error) throw error;
+    throw localBackendConnectionError();
   }
 }
+import { fetchEventSource } from "@microsoft/fetch-event-source";
