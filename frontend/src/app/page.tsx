@@ -1,20 +1,8 @@
 "use client";
 
-import {
-  ChevronRight,
-  FileText,
-  FolderOpen,
-  Globe2,
-  Loader2,
-  Plus,
-  Send,
-  ShieldCheck,
-  Square,
-  X,
-} from "lucide-react";
+import { X } from "lucide-react";
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Panel, PanelGroup, PanelResizeHandle, type ImperativePanelHandle } from "react-resizable-panels";
 
 import {
@@ -37,14 +25,14 @@ import {
   listConversations,
   listBidWorkflows,
   listMessages,
-  listProviderModels,
   listProjects,
   listProviderProfiles,
   searchWorkbench,
   updateProviderProfile,
   updateWebSearchConfig,
 } from "@/lib/api";
-import { MarkdownPane } from "@/components/MarkdownPane";
+import { ChatWorkspace } from "@/components/ChatWorkspace";
+import { ConfigDialog, type ProviderProfileDraft } from "@/components/ConfigDialog";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { AuthPanel, type AuthMode as AuthPanelMode } from "@/components/AuthPanel";
 import { BidWorkflowPanel } from "@/components/BidWorkflowPanel";
@@ -52,10 +40,10 @@ import { WorkbenchSidebar } from "@/components/WorkbenchSidebar";
 import { useAuth } from "@/hooks/useAuth";
 import { useBidWorkflow } from "@/hooks/useBidWorkflow";
 import { useChatStream } from "@/hooks/useChatStream";
+import { useProviderModels } from "@/hooks/useProviderModels";
 import type {
   BidWorkflow,
   ChatStreamEvent,
-  ProviderModel,
   ProviderProfile,
   SearchResult,
   WebSearchConfig,
@@ -65,7 +53,7 @@ import type {
 } from "@/lib/types";
 import { applyChatStreamEvent } from "@/lib/chatReducer";
 
-const providerPresets = [
+const providerPresets: ProviderProfileDraft[] = [
   { provider: "OpenAI", display_name: "OpenAI", base_url: "https://api.openai.com/v1", model: "gpt-4o" },
   { provider: "DeepSeek", display_name: "DeepSeek", base_url: "https://api.deepseek.com", model: "deepseek-v4-flash" },
   { provider: "通义千问 DashScope", display_name: "通义千问", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus" },
@@ -89,31 +77,12 @@ function localMessage(role: "user" | "assistant", content: string, status: strin
   };
 }
 
-function formatMessageTime(value: string): string {
-  const timestamp = new Date(value).getTime();
-  if (!Number.isFinite(timestamp)) return "";
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(timestamp);
-}
-
 function sanitizeFilename(value: string): string {
   return (value || "项目").replace(/[\\/:*?"<>|]/g, "_").trim() || "项目";
 }
 
 function stripExtension(value: string): string {
   return value.replace(/\.[^.]+$/, "");
-}
-
-function avatarContent(value: string) {
-  const trimmed = value.trim();
-  if (/^(https?:|data:image\/|blob:)/i.test(trimmed)) {
-    return <img src={trimmed} alt="" />;
-  }
-  return trimmed.slice(0, 4) || "AI";
 }
 
 export default function Home() {
@@ -145,12 +114,10 @@ export default function Home() {
   } = useAuth(setError);
   const [passwordForm, setPasswordForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "" });
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
-  const [providerModels, setProviderModels] = useState<ProviderModel[]>([]);
-  const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [projectsOpen, setProjectsOpen] = useState(true);
   const [projectConversationsOpen, setProjectConversationsOpen] = useState(true);
   const [conversationsOpen, setConversationsOpen] = useState(true);
-  const [profileForm, setProfileForm] = useState(providerPresets[0]);
+  const [profileForm, setProfileForm] = useState<ProviderProfileDraft>(providerPresets[0]);
   const [apiKey, setApiKey] = useState("");
   const [webSearchConfig, setWebSearchConfig] = useState<WebSearchConfig | null>(null);
   const [webSearchForm, setWebSearchForm] = useState({ api_key: "", max_results: "5", search_depth: "basic" });
@@ -172,7 +139,6 @@ export default function Home() {
   const [assistantChatAvatar, setAssistantChatAvatar] = useState("AI");
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const sidebarPanelRef = useRef<ImperativePanelHandle>(null);
 
   const currentProject = useMemo(() => projects.find((project) => project.id === currentProjectId) ?? null, [projects, currentProjectId]);
@@ -192,6 +158,7 @@ export default function Home() {
     return recentConversations.filter((conversation) => conversation.project_id === defaultProject?.id);
   }, [defaultProject?.id, recentConversations]);
   const currentProfile = useMemo(() => profiles.find((profile) => profile.id === currentProfileId) ?? null, [profiles, currentProfileId]);
+  const { models: providerModels, isLoading: isLoadingModels, error: providerModelsError } = useProviderModels(currentProfileId, modelMenuOpen);
 
   useEffect(() => {
     void initializeAuth().then((user) => user && bootstrap());
@@ -223,8 +190,16 @@ export default function Home() {
 
   useEffect(() => {
     setModelMenuOpen(false);
-    setProviderModels([]);
   }, [currentProfileId]);
+
+  useEffect(() => {
+    if (!modelMenuOpen || !providerModelsError) return;
+    setModelMenuOpen(false);
+    setConfigOpen(true);
+    setUserPanelOpen(false);
+    setAttachmentMenuOpen(false);
+    setError(providerModelsError instanceof Error ? providerModelsError.message : String(providerModelsError));
+  }, [modelMenuOpen, providerModelsError]);
 
   useEffect(() => {
     if (webSearchConfig?.has_key === false && webSearchEnabled) {
@@ -817,19 +792,7 @@ export default function Home() {
       return;
     }
     setModelMenuOpen(true);
-    if (providerModels.length > 0) return;
-
-    setIsLoadingModels(true);
     setError(null);
-    try {
-      setProviderModels(await listProviderModels(currentProfileId));
-    } catch (caught) {
-      setModelMenuOpen(false);
-      setError(caught instanceof Error ? caught.message : String(caught));
-      openConfigPanel();
-    } finally {
-      setIsLoadingModels(false);
-    }
   }
 
   async function chooseModel(modelId: string) {
@@ -851,119 +814,6 @@ export default function Home() {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
   }
-
-  const composerControls = (
-    <div className="composer-toolbar">
-      <div className="toolbar-left">
-        <input ref={fileInputRef} type="file" accept=".pdf,.docx,.txt,.md" className="hidden-file-input" onChange={uploadTenderFile} />
-        <DropdownMenu.Root open={attachmentMenuOpen} onOpenChange={setAttachmentMenuOpen}>
-          <DropdownMenu.Trigger asChild>
-            <button type="button" className="attachment-add-button" disabled={isBidBusy} aria-label="添加">
-              <Plus size={18} />
-            </button>
-          </DropdownMenu.Trigger>
-          <DropdownMenu.Portal>
-            <DropdownMenu.Content className="attachment-menu" side="top" align="start" sideOffset={8}>
-              <DropdownMenu.Item
-                className="attachment-menu-item"
-                disabled={isBidBusy}
-                onSelect={() => fileInputRef.current?.click()}
-              >
-                <FileText size={16} />
-                <span>上传招标文件</span>
-              </DropdownMenu.Item>
-            </DropdownMenu.Content>
-          </DropdownMenu.Portal>
-        </DropdownMenu.Root>
-        {uploadProgress !== null && (
-          <div className="upload-progress" title={uploadFileName}>
-            <span>{uploadProgress}%</span>
-            <div>
-              <i style={{ width: `${uploadProgress}%` }} />
-            </div>
-          </div>
-        )}
-        <button
-          type="button"
-          className={currentProfile?.model ? "access-button configured" : "access-button"}
-          onClick={openConfigPanel}
-        >
-          <ShieldCheck size={18} />
-          <span>{currentProfile?.model ? "模型已配置" : "配置模型"}</span>
-          <ChevronRight size={16} />
-        </button>
-        <button
-          type="button"
-          className={
-            webSearchConfig?.has_key === false
-              ? "web-search-toggle disabled"
-              : webSearchEnabled
-                ? "web-search-toggle active"
-                : "web-search-toggle"
-          }
-          onClick={() => {
-            if (webSearchConfig?.has_key === false) {
-              setError("请先在模型配置中填写 Tavily API key。");
-              return;
-            }
-            setWebSearchEnabled((current) => !current);
-          }}
-          aria-pressed={webSearchEnabled}
-          title={webSearchConfig?.has_key === false ? "请先配置 Tavily API key" : "使用 Tavily 联网搜索"}
-        >
-          <Globe2 size={17} />
-          <span>联网搜索</span>
-        </button>
-      </div>
-      <div className="toolbar-right">
-        <DropdownMenu.Root
-          open={modelMenuOpen}
-          onOpenChange={(open) => {
-            if (open) void openModelMenu();
-            else setModelMenuOpen(false);
-          }}
-        >
-          <DropdownMenu.Trigger asChild>
-            <button type="button" className="model-select">
-              {currentProfile?.model ?? "选择模型"}
-              <ChevronRight className={modelMenuOpen ? "chevron open" : "chevron"} size={15} />
-            </button>
-          </DropdownMenu.Trigger>
-          <DropdownMenu.Portal>
-            <DropdownMenu.Content className="model-menu" side="top" align="end" sideOffset={8}>
-              {isLoadingModels ? (
-                <div className="model-menu-status">
-                  <Loader2 size={14} />
-                  拉取模型中
-                </div>
-              ) : providerModels.length === 0 ? (
-                <div className="model-menu-status">未返回模型列表</div>
-              ) : (
-                providerModels.map((model) => (
-                  <DropdownMenu.Item
-                    className={model.id === currentProfile?.model ? "model-option active" : "model-option"}
-                    key={model.id}
-                    onSelect={() => chooseModel(model.id)}
-                  >
-                    {model.name || model.id}
-                  </DropdownMenu.Item>
-                ))
-              )}
-            </DropdownMenu.Content>
-          </DropdownMenu.Portal>
-        </DropdownMenu.Root>
-        {isStreaming ? (
-          <button type="button" className="send-round" onClick={stopStreaming} aria-label="停止生成">
-            <Square size={17} />
-          </button>
-        ) : (
-          <button className="send-round" disabled={!input.trim()} aria-label="发送">
-            <Send size={18} />
-          </button>
-        )}
-      </div>
-    </div>
-  );
 
   const workflowPanel = (
     <BidWorkflowPanel
@@ -1024,194 +874,65 @@ export default function Home() {
       </Panel>
       <PanelResizeHandle className="sidebar-resize-handle" hitAreaMargins={{ coarse: 16, fine: 8 }} />
       <Panel id="workbench-chat" order={2} minSize={40}>
-        <section className="chat-workspace">
-        {error && <div className="error-banner">{error}</div>}
+        <ChatWorkspace
+          error={error}
+          messages={messages}
+          currentProjectTitle={currentProject?.title ?? null}
+          currentConversationTitle={currentConversation?.title ?? null}
+          input={input}
+          onInputChange={setInput}
+          onSend={() => sendMessage()}
+          isStreaming={isStreaming}
+          onStopStreaming={stopStreaming}
+          isBidBusy={isBidBusy}
+          onUploadTenderFile={uploadTenderFile}
+          uploadProgress={uploadProgress}
+          uploadFileName={uploadFileName}
+          isConfigured={Boolean(currentProfile?.model)}
+          currentProfileModel={currentProfile?.model ?? null}
+          onOpenConfig={openConfigPanel}
+          webSearchConfig={webSearchConfig}
+          webSearchEnabled={webSearchEnabled}
+          onToggleWebSearch={() => {
+            if (webSearchConfig?.has_key === false) {
+              setError("请先在模型配置中填写 Tavily API key。");
+              return;
+            }
+            setWebSearchEnabled((current) => !current);
+          }}
+          modelMenuOpen={modelMenuOpen}
+          onModelMenuOpenChange={(open) => {
+            if (open) void openModelMenu();
+            else setModelMenuOpen(false);
+          }}
+          providerModels={providerModels}
+          isLoadingModels={isLoadingModels}
+          onChooseModel={chooseModel}
+          attachmentMenuOpen={attachmentMenuOpen}
+          onAttachmentMenuOpenChange={setAttachmentMenuOpen}
+          onChooseWorkspace={chooseWorkspaceDirectory}
+          userAvatar={userChatAvatar}
+          assistantAvatar={assistantChatAvatar}
+          workflowPanel={workflowPanel}
+        />
 
-        {messages.length === 0 ? (
-          <div className="landing-stage">
-            <h1>今天想聊什么？</h1>
-            <form className="composer hero-composer" onSubmit={sendMessage}>
-              <textarea
-                value={input}
-                onChange={(event) => setInput(event.target.value)}
-                placeholder={currentProfileId ? "随心输入或者上传招标文件" : "先配置模型 API"}
-                rows={2}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    void sendMessage();
-                  }
-                }}
-              />
-              {composerControls}
-              <button type="button" className="choose-project" onClick={chooseWorkspaceDirectory}>
-                <FolderOpen size={16} />
-                <span>{currentProject?.title ? `当前工作目录 · ${currentProject.title}` : "选择项目工作目录"}</span>
-              </button>
-            </form>
-          </div>
-        ) : (
-          <>
-            <div className="messages">
-              <div className="conversation-title">
-                <span>{currentProject?.title ?? "默认项目"}</span>
-                <h1>{currentConversation?.title ?? "新对话"}</h1>
-              </div>
-              {messages.map((message) => (
-                <article className={`message-row ${message.role}`} key={message.id}>
-                  <div className="avatar chat-avatar">{avatarContent(message.role === "user" ? userChatAvatar : assistantChatAvatar)}</div>
-                  <div className="message-bubble">
-                    <div className="message-meta">
-                      <span>{message.role === "user" ? "用户" : "LLM"}</span>
-                      <time>{formatMessageTime(message.created_at)}</time>
-                    </div>
-                    {message.role === "assistant" ? (
-                      <MarkdownPane content={message.content} empty={message.status === "streaming" ? "正在生成..." : "暂无内容"} />
-                    ) : (
-                      <p>{message.content}</p>
-                    )}
-                    {message.status === "streaming" && (
-                      <span className="message-status">
-                        <Loader2 size={14} />
-                        streaming
-                      </span>
-                    )}
-                    {message.status === "interrupted" && <span className="message-status">interrupted</span>}
-                    {message.status === "error" && <span className="message-status error">error</span>}
-                  </div>
-                </article>
-              ))}
-              {workflowPanel}
-            </div>
-            <form className="composer docked-composer" onSubmit={sendMessage}>
-              <textarea
-                value={input}
-                onChange={(event) => setInput(event.target.value)}
-                placeholder={currentProfileId ? "随心输入或者上传招标文件" : "先配置模型 API"}
-                rows={1}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    void sendMessage();
-                  }
-                }}
-              />
-              {composerControls}
-            </form>
-          </>
-        )}
-      </section>
-
-      <Dialog.Root open={configOpen} onOpenChange={setConfigOpen}>
-        <Dialog.Portal>
-          <Dialog.Overlay className="config-modal-backdrop" />
-          <Dialog.Content className="config-modal" aria-describedby="config-modal-description">
-            <div className="config-panel-header">
-              <div>
-                <Dialog.Title asChild><strong>模型与工具配置</strong></Dialog.Title>
-                <Dialog.Description asChild><span id="config-modal-description">模型 API 和联网搜索仅保存在本机</span></Dialog.Description>
-              </div>
-              <Dialog.Close asChild><button type="button" aria-label="关闭模型配置">
-                <X size={17} />
-              </button></Dialog.Close>
-            </div>
-            <div className="config-panel-scroll">
-              <form className="config-section" onSubmit={saveProfile}>
-                <div className="config-section-title">模型配置</div>
-                <div className="config-grid">
-                  <label>
-                    Provider
-                    <select value={profileForm.provider} onChange={(event) => choosePreset(event.target.value)}>
-                      {providerPresets.map((preset) => (
-                        <option key={preset.provider}>{preset.provider}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    显示名称
-                    <input value={profileForm.display_name} onChange={(event) => setProfileForm({ ...profileForm, display_name: event.target.value })} />
-                  </label>
-                  <label>
-                    Base URL
-                    <input value={profileForm.base_url} onChange={(event) => setProfileForm({ ...profileForm, base_url: event.target.value })} />
-                  </label>
-                  <label>
-                    Model
-                    <input value={profileForm.model} onChange={(event) => setProfileForm({ ...profileForm, model: event.target.value })} />
-                  </label>
-                  <label className="api-key-field">
-                    API key
-                    <input value={apiKey} type="password" onChange={(event) => setApiKey(event.target.value)} placeholder="保存到当前账号本地数据库" />
-                  </label>
-                </div>
-                <div className="config-actions">
-                  <button type="submit">保存模型</button>
-                </div>
-              </form>
-
-              <form className="config-section" onSubmit={saveWebSearchConfig}>
-                <div className="config-section-title">
-                  <span>联网搜索</span>
-                  <em>
-                    {webSearchConfig?.source === "system"
-                      ? "已配置（系统凭据库）"
-                      : webSearchConfig?.source === "env"
-                        ? "已配置（环境变量）"
-                        : "未配置"}
-                  </em>
-                </div>
-                {webSearchConfig?.source === "env" && (
-                  <div className="config-message">
-                    当前 key 来自环境变量（.env 文件），优先级低于本地保存的 key。在下方填写新 key 保存后将覆盖。
-                  </div>
-                )}
-                <div className="config-grid">
-                  <label className="api-key-field">
-                    Tavily API key
-                    <input
-                      value={webSearchForm.api_key}
-                      type="password"
-                      onChange={(event) => setWebSearchForm({ ...webSearchForm, api_key: event.target.value })}
-                      placeholder={
-                        webSearchConfig?.source === "system"
-                          ? "留空则保留系统凭据库中的 key"
-                          : webSearchConfig?.source === "env"
-                            ? "填写后保存到本地（替代环境变量）"
-                            : "填写 Tavily API key"
-                      }
-                      disabled={webSearchSaveState === "saving"}
-                    />
-                  </label>
-                  <label>
-                    结果数量
-                    <input
-                      value={webSearchForm.max_results}
-                      type="number"
-                      min={1}
-                      max={10}
-                      onChange={(event) => setWebSearchForm({ ...webSearchForm, max_results: event.target.value })}
-                      disabled={webSearchSaveState === "saving"}
-                    />
-                  </label>
-                  <label>
-                    搜索深度
-                    <select value={webSearchForm.search_depth} onChange={(event) => setWebSearchForm({ ...webSearchForm, search_depth: event.target.value })} disabled={webSearchSaveState === "saving"}>
-                      <option value="basic">basic</option>
-                      <option value="advanced">advanced</option>
-                    </select>
-                  </label>
-                </div>
-                {webSearchSaveMessage && <div className={webSearchSaveState === "error" ? "config-message error" : "config-message"}>{webSearchSaveMessage}</div>}
-                <div className="config-actions">
-                  <button type="submit" disabled={webSearchSaveState === "saving"}>
-                    {webSearchSaveState === "saving" ? "保存中" : "保存搜索"}
-                  </button>
-                </div>
-              </form>
-            </div>
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>
+      <ConfigDialog
+        open={configOpen}
+        onOpenChange={setConfigOpen}
+        presets={providerPresets}
+        profile={profileForm}
+        apiKey={apiKey}
+        onProfileChange={setProfileForm}
+        onApiKeyChange={setApiKey}
+        onPresetChange={choosePreset}
+        onSaveProfile={saveProfile}
+        webSearchConfig={webSearchConfig}
+        webSearchForm={webSearchForm}
+        webSearchSaveState={webSearchSaveState}
+        webSearchSaveMessage={webSearchSaveMessage}
+        onWebSearchFormChange={setWebSearchForm}
+        onSaveWebSearch={saveWebSearchConfig}
+      />
 
       <Dialog.Root open={userPanelOpen} onOpenChange={setUserPanelOpen}>
         <Dialog.Portal>
