@@ -87,9 +87,11 @@ npm config set cache "D:\\npm-cache" --global
 
 ```bash
 python3 -m pip install -r backend/requirements.txt
-npm install
-npm --prefix frontend install
+npm ci
+npm --prefix frontend ci
 ```
+
+根目录和 `frontend/` 是两个独立的 Node 依赖目录，两个安装命令都需要执行。执行 `npm run pack:*` 或 `npm run dist:*` 时，如果检测到前端直接依赖缺失，会自动按 `frontend/package-lock.json` 补装一次；正常情况下不会重复安装。
 
 ### 启动
 

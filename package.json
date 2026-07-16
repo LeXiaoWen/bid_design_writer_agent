@@ -11,7 +11,7 @@
     "dev:ui": "npm --prefix frontend run dev",
     "dev:agent": "node scripts/run-agent.js",
     "dev:electron": "wait-on http://localhost:3000 && npm run build:desktop && node scripts/run-electron.mjs",
-    "build": "npm --prefix frontend run build && npm run build:desktop",
+    "build": "node scripts/ensure-frontend-dependencies.mjs && npm --prefix frontend run build && npm run build:desktop",
     "build:agent": "node scripts/build-agent.mjs",
     "build:desktop": "tsc -p desktop/tsconfig.json",
     "pack": "node scripts/package-desktop.mjs --dir",
