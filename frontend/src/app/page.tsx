@@ -1,9 +1,7 @@
 "use client";
 
 import {
-  CheckCircle2,
   ChevronRight,
-  Download,
   FileText,
   FolderOpen,
   Globe2,
@@ -17,7 +15,6 @@ import {
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { useQuery } from "@tanstack/react-query";
 import { Panel, PanelGroup, PanelResizeHandle, type ImperativePanelHandle } from "react-resizable-panels";
 
 import {
@@ -35,9 +32,7 @@ import {
   downloadBidZip,
   extractBidWorkflow,
   generateBidWorkflow,
-  getAuthStatus,
   getBidWorkflow,
-  getMe,
   getWebSearchConfig,
   listConversations,
   listBidWorkflows,
@@ -45,22 +40,19 @@ import {
   listProviderModels,
   listProjects,
   listProviderProfiles,
-  loginAuth,
-  logoutAuth,
   searchWorkbench,
-  setApiBaseUrl,
-  setAuthContext,
-  registerAuth,
   updateProviderProfile,
   updateWebSearchConfig,
 } from "@/lib/api";
 import { MarkdownPane } from "@/components/MarkdownPane";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { AuthPanel, type AuthMode as AuthPanelMode } from "@/components/AuthPanel";
+import { BidWorkflowPanel } from "@/components/BidWorkflowPanel";
 import { WorkbenchSidebar } from "@/components/WorkbenchSidebar";
+import { useAuth } from "@/hooks/useAuth";
+import { useBidWorkflow } from "@/hooks/useBidWorkflow";
 import { useChatStream } from "@/hooks/useChatStream";
 import type {
-  AuthUser,
   BidWorkflow,
   ChatStreamEvent,
   ProviderModel,
@@ -82,7 +74,6 @@ const providerPresets = [
   { provider: "自定义", display_name: "自定义", base_url: "", model: "" },
 ];
 
-type AuthMode = AuthPanelMode | "ready";
 const PROJECT_PREVIEW_CONVERSATION_LIMIT = 6;
 
 function localMessage(role: "user" | "assistant", content: string, status: string): WorkbenchMessage {
@@ -96,27 +87,6 @@ function localMessage(role: "user" | "assistant", content: string, status: strin
     created_at: now,
     updated_at: now,
   };
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
-async function getAuthStatusWithRetry() {
-  let lastError: unknown = null;
-  const maxAttempts = 180;
-  const delayMs = 500;
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    try {
-      return await getAuthStatus();
-    } catch (caught) {
-      lastError = caught;
-      const message = caught instanceof Error ? caught.message : String(caught);
-      if (!message.includes("无法连接本地后端")) throw caught;
-      await sleep(attempt === 0 ? 100 : delayMs);
-    }
-  }
-  throw lastError instanceof Error ? lastError : new Error("本地后端启动超时，请重新打开应用。");
 }
 
 function formatMessageTime(value: string): string {
@@ -136,25 +106,6 @@ function sanitizeFilename(value: string): string {
 
 function stripExtension(value: string): string {
   return value.replace(/\.[^.]+$/, "");
-}
-
-function workflowStatusText(status: BidWorkflow["status"]): string {
-  const labels: Record<BidWorkflow["status"], string> = {
-    uploaded: "已上传",
-    extracting: "阶段一提取中",
-    extraction_ready: "待确认",
-    generating: "阶段二生成中",
-    completed: "已完成",
-    failed: "执行失败",
-    cancelled: "已取消",
-  };
-  return labels[status];
-}
-
-function workflowExecutionText(workflow: BidWorkflow): string {
-  const execution = workflow.execution;
-  if (!execution) return workflowStatusText(workflow.status);
-  return `${execution.message || workflowStatusText(workflow.status)}${execution.state === "running" ? ` ${execution.progress}%` : ""}`;
 }
 
 function avatarContent(value: string) {
@@ -183,9 +134,15 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
   const [userPanelOpen, setUserPanelOpen] = useState(false);
-  const [authMode, setAuthMode] = useState<AuthMode>("login");
-  const [authBackendReady, setAuthBackendReady] = useState(false);
-  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const {
+    mode: authMode,
+    backendReady: authBackendReady,
+    user: authUser,
+    initialize: initializeAuth,
+    switchMode: switchAuthMode,
+    submit: submitAuthRequest,
+    logout: logoutAuthSession,
+  } = useAuth(setError);
   const [passwordForm, setPasswordForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "" });
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [providerModels, setProviderModels] = useState<ProviderModel[]>([]);
@@ -199,10 +156,16 @@ export default function Home() {
   const [webSearchForm, setWebSearchForm] = useState({ api_key: "", max_results: "5", search_depth: "basic" });
   const [webSearchSaveState, setWebSearchSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [webSearchSaveMessage, setWebSearchSaveMessage] = useState("");
-  const [activeBidWorkflow, setActiveBidWorkflow] = useState<BidWorkflow | null>(null);
+  const {
+    workflow: activeBidWorkflow,
+    setWorkflow: setActiveBidWorkflow,
+    isBusy: isBidBusy,
+    setIsBusy: setIsBidBusy,
+    polledWorkflow,
+    error: workflowError,
+  } = useBidWorkflow();
   const [bidConfirmation, setBidConfirmation] = useState("确认");
   const [bidExtraContext, setBidExtraContext] = useState("");
-  const [isBidBusy, setIsBidBusy] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [uploadFileName, setUploadFileName] = useState("");
   const [userChatAvatar, setUserChatAvatar] = useState("我");
@@ -231,8 +194,8 @@ export default function Home() {
   const currentProfile = useMemo(() => profiles.find((profile) => profile.id === currentProfileId) ?? null, [profiles, currentProfileId]);
 
   useEffect(() => {
-    void initializeAuth();
-  }, []);
+    void initializeAuth().then((user) => user && bootstrap());
+  }, [initializeAuth]);
 
   useEffect(() => {
     const handleAuthExpired = () => {
@@ -247,37 +210,6 @@ export default function Home() {
     setUserChatAvatar(window.localStorage.getItem("bid-writer-user-avatar") || "我");
     setAssistantChatAvatar(window.localStorage.getItem("bid-writer-assistant-avatar") || "AI");
   }, []);
-
-  async function initializeAuth() {
-    try {
-      const [appSecret, savedToken] = await Promise.all([
-        window.bidDesignWriterDesktop?.getAppAuthSecret?.() ?? Promise.resolve(null),
-        Promise.resolve(window.sessionStorage.getItem("ai-workbench-auth-token")),
-      ]);
-      const backendUrl = await (window.bidDesignWriterDesktop?.getBackendUrl?.() ?? Promise.resolve(null));
-      setApiBaseUrl(backendUrl);
-      setAuthContext({ appSecret, token: savedToken });
-      const status = await getAuthStatusWithRetry();
-      setAuthBackendReady(true);
-      setError(null);
-      if (status.authenticated && savedToken) {
-        const user = await getMe();
-        setAuthUser(user);
-        setAuthMode("ready");
-        await bootstrap();
-        return;
-      }
-    } catch (caught) {
-      setAuthBackendReady(false);
-      setAuthMode("login");
-      setError(caught instanceof Error ? caught.message : String(caught));
-    }
-  }
-
-  function switchAuthMode(nextMode: "login" | "register") {
-    setAuthMode(nextMode);
-    setError(null);
-  }
 
   useEffect(() => {
     if (!configOpen || !currentProfile) return;
@@ -316,31 +248,22 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [searchQuery]);
 
-  const workflowQuery = useQuery({
-    queryKey: ["bid-workflow", activeBidWorkflow?.id],
-    queryFn: () => getBidWorkflow(activeBidWorkflow!.id),
-    enabled: Boolean(activeBidWorkflow?.id),
-    refetchInterval: (query) => (["extracting", "generating"].includes(query.state.data?.status ?? "") ? 1500 : false),
-  });
-
   useEffect(() => {
-    const workflow = workflowQuery.data;
+    const workflow = polledWorkflow;
     if (!workflow) return;
-    setActiveBidWorkflow(workflow);
-    setIsBidBusy(["extracting", "generating"].includes(workflow.status));
     if (workflow.conversation_id === currentConversationId) {
       void listMessages(workflow.conversation_id).then(setMessages).catch((caught) => setError(caught instanceof Error ? caught.message : String(caught)));
     }
     if (!["extracting", "generating"].includes(workflow.status)) {
       void refreshConversations(currentProjectId).catch((caught) => setError(caught instanceof Error ? caught.message : String(caught)));
     }
-  }, [workflowQuery.data, currentConversationId, currentProjectId]);
+  }, [polledWorkflow, currentConversationId, currentProjectId]);
 
   useEffect(() => {
-    if (!workflowQuery.error) return;
-    setError(workflowQuery.error instanceof Error ? workflowQuery.error.message : String(workflowQuery.error));
+    if (!workflowError) return;
+    setError(workflowError instanceof Error ? workflowError.message : String(workflowError));
     setIsBidBusy(false);
-  }, [workflowQuery.error]);
+  }, [workflowError, setIsBidBusy]);
 
   async function bootstrap() {
     try {
@@ -837,31 +760,9 @@ export default function Home() {
     window.localStorage.setItem("bid-writer-assistant-avatar", value);
   }
 
-  async function completeAuthSession(token: string) {
-    window.sessionStorage.setItem("ai-workbench-auth-token", token);
-    setAuthContext({ token });
-    const user = await getMe();
-    setAuthUser(user);
-    setAuthMode("ready");
-    setError(null);
-    await bootstrap();
-  }
-
   async function submitAuth(mode: AuthPanelMode, values: { username: string; password: string; confirmPassword: string }) {
-    if (!authBackendReady) {
-      setError("正在连接本地后端，请稍候。");
-      return;
-    }
-    const username = values.username.trim();
-    try {
-      const response =
-        mode === "register"
-          ? await registerAuth({ username, password: values.password })
-          : await loginAuth({ username, password: values.password });
-      await completeAuthSession(response.token);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    }
+    const user = await submitAuthRequest(mode, { username: values.username, password: values.password });
+    if (user) await bootstrap();
   }
 
   async function changeCurrentPassword(event: FormEvent) {
@@ -887,15 +788,7 @@ export default function Home() {
   }
 
   async function logoutUser() {
-    try {
-      await logoutAuth();
-    } catch {
-      // Local logout should still clear the session if the token is already invalid.
-    }
-    window.sessionStorage.removeItem("ai-workbench-auth-token");
-    setAuthContext({ token: null });
-    setAuthUser(null);
-    setAuthMode("login");
+    await logoutAuthSession();
     setUserPanelOpen(false);
     setProjects([]);
     setProjectConversations([]);
@@ -1072,105 +965,24 @@ export default function Home() {
     </div>
   );
 
-  const workflowPanel =
-    activeBidWorkflow && activeBidWorkflow.conversation_id === currentConversationId ? (
-      <section className="workflow-panel">
-        <div className="workflow-header">
-          <div>
-            <span>{workflowExecutionText(activeBidWorkflow)}</span>
-            <strong>{activeBidWorkflow.file_name}</strong>
-          </div>
-          <div className="workflow-header-tools">
-            {["uploaded", "extracting", "extraction_ready", "generating", "failed"].includes(activeBidWorkflow.status) && (
-              <>
-                {["extracting", "generating"].includes(activeBidWorkflow.status) && <Loader2 size={18} className="spin-icon" />}
-                <button type="button" onClick={cancelWorkflow}>
-                  取消
-                </button>
-              </>
-            )}
-            {activeBidWorkflow.status === "completed" && <CheckCircle2 size={18} />}
-          </div>
-        </div>
-
-        {activeBidWorkflow.status === "extraction_ready" && !activeBidWorkflow.confirmation_text && (
-          <div className="workflow-actions">
-            <label>
-              确认信息
-              <textarea value={bidConfirmation} onChange={(event) => setBidConfirmation(event.target.value)} rows={3} />
-            </label>
-            <button type="button" onClick={confirmWorkflow} disabled={isBidBusy}>
-              确认阶段一
-            </button>
-          </div>
-        )}
-
-        {activeBidWorkflow.confirmation_text && !["completed", "cancelled"].includes(activeBidWorkflow.status) && (
-          <div className="workflow-actions">
-            <div className="workflow-note">目录结构将按当前招标范围、评分、成果和格式要求动态编排，不套用固定模板。</div>
-            <label>
-              补充信息
-              <textarea
-                value={bidExtraContext}
-                onChange={(event) => setBidExtraContext(event.target.value)}
-                rows={3}
-                placeholder="企业优势、类似业绩、设计团队或章节偏好"
-              />
-            </label>
-            <button type="button" onClick={generateWorkflow} disabled={isBidBusy || activeBidWorkflow.status === "generating"}>
-              生成设计方案
-            </button>
-          </div>
-        )}
-
-        {activeBidWorkflow.status === "failed" && (
-          <div className="workflow-error">
-            <span>{activeBidWorkflow.error ?? "执行失败"}</span>
-            <button type="button" onClick={retryWorkflow} disabled={isBidBusy}>
-              重试当前阶段
-            </button>
-          </div>
-        )}
-
-        {activeBidWorkflow.status === "completed" && (
-          <div className="artifact-list">
-            <div className="artifact-primary-actions">
-              {activeBidWorkflow.artifacts.find((artifact) => artifact.kind === "proposal") ? (
-                <button
-                  type="button"
-                  className="artifact-primary-button"
-                  onClick={() => downloadArtifact(activeBidWorkflow.artifacts.find((artifact) => artifact.kind === "proposal")!.name)}
-                >
-                  <Download size={15} />
-                  <span>下载 Markdown 文件</span>
-                </button>
-              ) : (
-                <button type="button" className="artifact-primary-button" onClick={refreshActiveWorkflow}>
-                  <Download size={15} />
-                  <span>刷新成果文件</span>
-                </button>
-              )}
-              {activeBidWorkflow.artifacts.length > 0 && (
-                <button type="button" className="artifact-primary-button" onClick={downloadArtifactsZip}>
-                  <Download size={15} />
-                  <span>下载 ZIP 包</span>
-                </button>
-              )}
-            </div>
-            {activeBidWorkflow.artifacts.length > 0 ? (
-              activeBidWorkflow.artifacts.map((artifact) => (
-                <button type="button" key={artifact.name} onClick={() => downloadArtifact(artifact.name)}>
-                  <Download size={15} />
-                  <span>{artifact.name}</span>
-                </button>
-              ))
-            ) : (
-              <div className="workflow-note">阶段二已完成，正在等待成果文件同步。</div>
-            )}
-          </div>
-        )}
-      </section>
-    ) : null;
+  const workflowPanel = (
+    <BidWorkflowPanel
+      workflow={activeBidWorkflow}
+      currentConversationId={currentConversationId}
+      confirmation={bidConfirmation}
+      extraContext={bidExtraContext}
+      isBusy={isBidBusy}
+      onConfirmationChange={setBidConfirmation}
+      onExtraContextChange={setBidExtraContext}
+      onCancel={cancelWorkflow}
+      onConfirm={confirmWorkflow}
+      onGenerate={generateWorkflow}
+      onRetry={retryWorkflow}
+      onRefresh={refreshActiveWorkflow}
+      onDownloadArtifact={downloadArtifact}
+      onDownloadZip={downloadArtifactsZip}
+    />
+  );
 
   if (authMode !== "ready") {
     return <AuthPanel mode={authMode} backendReady={authBackendReady} error={error} onModeChange={switchAuthMode} onSubmit={submitAuth} />;
