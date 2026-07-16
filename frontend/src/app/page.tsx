@@ -343,6 +343,24 @@ export default function Home() {
   }, [configOpen, currentProfile]);
 
   useEffect(() => {
+    if (!configOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setConfigOpen(false);
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [configOpen]);
+
+  useEffect(() => {
+    if (!userPanelOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setUserPanelOpen(false);
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [userPanelOpen]);
+
+  useEffect(() => {
     setModelMenuOpen(false);
     setProviderModels([]);
   }, [currentProfileId]);
@@ -854,8 +872,6 @@ export default function Home() {
   }
 
   function openConfigPanel() {
-    setSidebarCollapsed(false);
-    setSidebarWidth((current) => Math.max(current, 320));
     setConfigOpen(true);
     setUserPanelOpen(false);
     setModelMenuOpen(false);
@@ -865,7 +881,6 @@ export default function Home() {
   }
 
   function toggleUserPanel() {
-    setSidebarCollapsed(false);
     setConfigOpen(false);
     setModelMenuOpen(false);
     setAttachmentMenuOpen(false);
@@ -1312,114 +1327,6 @@ export default function Home() {
           </button>
         </div>
 
-        {configOpen && !sidebarCollapsed && (
-          <section className="config-panel" aria-label="模型与工具配置">
-            <div className="config-panel-header">
-              <div>
-                <strong>模型与工具配置</strong>
-                <span>模型 API 和联网搜索仅保存在本机</span>
-              </div>
-              <button type="button" onClick={() => setConfigOpen(false)} aria-label="关闭模型配置">
-                <X size={17} />
-              </button>
-            </div>
-            <div className="config-panel-scroll">
-              <form className="config-section" onSubmit={saveProfile}>
-                <div className="config-section-title">模型配置</div>
-                <div className="config-grid">
-                  <label>
-                    Provider
-                    <select value={profileForm.provider} onChange={(event) => choosePreset(event.target.value)}>
-                      {providerPresets.map((preset) => (
-                        <option key={preset.provider}>{preset.provider}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    显示名称
-                    <input value={profileForm.display_name} onChange={(event) => setProfileForm({ ...profileForm, display_name: event.target.value })} />
-                  </label>
-                  <label>
-                    Base URL
-                    <input value={profileForm.base_url} onChange={(event) => setProfileForm({ ...profileForm, base_url: event.target.value })} />
-                  </label>
-                  <label>
-                    Model
-                    <input value={profileForm.model} onChange={(event) => setProfileForm({ ...profileForm, model: event.target.value })} />
-                  </label>
-                  <label className="api-key-field">
-                    API key
-                    <input value={apiKey} type="password" onChange={(event) => setApiKey(event.target.value)} placeholder="保存到当前账号本地数据库" />
-                  </label>
-                </div>
-                <div className="config-actions">
-                  <button type="submit">保存模型</button>
-                </div>
-              </form>
-
-              <form className="config-section" onSubmit={saveWebSearchConfig}>
-                <div className="config-section-title">
-                  <span>联网搜索</span>
-                  <em>
-                    {webSearchConfig?.source === "db"
-                      ? "已配置（本地）"
-                      : webSearchConfig?.source === "env"
-                        ? "已配置（环境变量）"
-                        : "未配置"}
-                  </em>
-                </div>
-                {webSearchConfig?.source === "env" && (
-                  <div className="config-message">
-                    当前 key 来自环境变量（.env 文件），优先级低于本地保存的 key。在下方填写新 key 保存后将覆盖。
-                  </div>
-                )}
-                <div className="config-grid">
-                  <label className="api-key-field">
-                    Tavily API key
-                    <input
-                      value={webSearchForm.api_key}
-                      type="password"
-                      onChange={(event) => setWebSearchForm({ ...webSearchForm, api_key: event.target.value })}
-                      placeholder={
-                        webSearchConfig?.source === "db"
-                          ? "留空则保留现有 key"
-                          : webSearchConfig?.source === "env"
-                            ? "填写后保存到本地（替代环境变量）"
-                            : "填写 Tavily API key"
-                      }
-                      disabled={webSearchSaveState === "saving"}
-                    />
-                  </label>
-                  <label>
-                    结果数量
-                    <input
-                      value={webSearchForm.max_results}
-                      type="number"
-                      min={1}
-                      max={10}
-                      onChange={(event) => setWebSearchForm({ ...webSearchForm, max_results: event.target.value })}
-                      disabled={webSearchSaveState === "saving"}
-                    />
-                  </label>
-                  <label>
-                    搜索深度
-                    <select value={webSearchForm.search_depth} onChange={(event) => setWebSearchForm({ ...webSearchForm, search_depth: event.target.value })} disabled={webSearchSaveState === "saving"}>
-                      <option value="basic">basic</option>
-                      <option value="advanced">advanced</option>
-                    </select>
-                  </label>
-                </div>
-                {webSearchSaveMessage && <div className={webSearchSaveState === "error" ? "config-message error" : "config-message"}>{webSearchSaveMessage}</div>}
-                <div className="config-actions">
-                  <button type="submit" disabled={webSearchSaveState === "saving"}>
-                    {webSearchSaveState === "saving" ? "保存中" : "保存搜索"}
-                  </button>
-                </div>
-              </form>
-            </div>
-          </section>
-        )}
-
         <div className="sidebar-section">
           {!sidebarCollapsed && (
             <button className="section-label section-toggle" onClick={() => setProjectsOpen((current) => !current)}>
@@ -1529,72 +1436,6 @@ export default function Home() {
             </div>
           )}
         </div>
-
-        {userPanelOpen && !sidebarCollapsed && (
-          <section className="user-panel">
-            <div className="user-panel-header">
-              <strong>账号</strong>
-              <button type="button" onClick={() => setUserPanelOpen(false)} aria-label="关闭账号面板">
-                ×
-              </button>
-            </div>
-            <div className="user-panel-scroll">
-              <div className="user-detail">
-                <span>当前账号</span>
-                <strong>{authUser?.username ?? "未登录"}</strong>
-              </div>
-              <div className="user-detail">
-                <span>数据范围</span>
-                <strong>当前账号独立数据</strong>
-              </div>
-              <div className="avatar-settings">
-                <label>
-                  用户头像
-                  <input value={userChatAvatar} onChange={(event) => updateChatAvatar("user", event.target.value)} placeholder="文字、emoji 或图片 URL" />
-                </label>
-                <label>
-                  LLM 头像
-                  <input value={assistantChatAvatar} onChange={(event) => updateChatAvatar("assistant", event.target.value)} placeholder="文字、emoji 或图片 URL" />
-                </label>
-              </div>
-              <form className="user-login-form" onSubmit={changeCurrentPassword}>
-                <label>
-                  当前密码
-                  <input
-                    value={passwordForm.currentPassword}
-                    type="password"
-                    onChange={(event) => setPasswordForm({ ...passwordForm, currentPassword: event.target.value })}
-                    autoComplete="current-password"
-                  />
-                </label>
-                <label>
-                  新密码
-                  <input
-                    value={passwordForm.newPassword}
-                    type="password"
-                    onChange={(event) => setPasswordForm({ ...passwordForm, newPassword: event.target.value })}
-                    autoComplete="new-password"
-                  />
-                </label>
-                <label>
-                  确认新密码
-                  <input
-                    value={passwordForm.confirmPassword}
-                    type="password"
-                    onChange={(event) => setPasswordForm({ ...passwordForm, confirmPassword: event.target.value })}
-                    autoComplete="new-password"
-                  />
-                </label>
-                <button type="submit">修改密码</button>
-              </form>
-            </div>
-            <div className="user-panel-actions">
-              <button type="button" className="user-secondary-action" onClick={logoutUser}>
-                退出登录
-              </button>
-            </div>
-          </section>
-        )}
 
         <button type="button" className="account-card" onClick={toggleUserPanel} title="用户信息">
           <div className="account-avatar">{userInitials(authUser)}</div>
@@ -1708,6 +1549,184 @@ export default function Home() {
           </>
         )}
       </section>
+
+      {configOpen && (
+        <div className="config-modal-backdrop" onClick={() => setConfigOpen(false)}>
+          <section className="config-modal" role="dialog" aria-modal="true" aria-labelledby="config-modal-title" onClick={(event) => event.stopPropagation()}>
+            <div className="config-panel-header">
+              <div>
+                <strong id="config-modal-title">模型与工具配置</strong>
+                <span>模型 API 和联网搜索仅保存在本机</span>
+              </div>
+              <button type="button" onClick={() => setConfigOpen(false)} aria-label="关闭模型配置">
+                <X size={17} />
+              </button>
+            </div>
+            <div className="config-panel-scroll">
+              <form className="config-section" onSubmit={saveProfile}>
+                <div className="config-section-title">模型配置</div>
+                <div className="config-grid">
+                  <label>
+                    Provider
+                    <select value={profileForm.provider} onChange={(event) => choosePreset(event.target.value)}>
+                      {providerPresets.map((preset) => (
+                        <option key={preset.provider}>{preset.provider}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    显示名称
+                    <input value={profileForm.display_name} onChange={(event) => setProfileForm({ ...profileForm, display_name: event.target.value })} />
+                  </label>
+                  <label>
+                    Base URL
+                    <input value={profileForm.base_url} onChange={(event) => setProfileForm({ ...profileForm, base_url: event.target.value })} />
+                  </label>
+                  <label>
+                    Model
+                    <input value={profileForm.model} onChange={(event) => setProfileForm({ ...profileForm, model: event.target.value })} />
+                  </label>
+                  <label className="api-key-field">
+                    API key
+                    <input value={apiKey} type="password" onChange={(event) => setApiKey(event.target.value)} placeholder="保存到当前账号本地数据库" />
+                  </label>
+                </div>
+                <div className="config-actions">
+                  <button type="submit">保存模型</button>
+                </div>
+              </form>
+
+              <form className="config-section" onSubmit={saveWebSearchConfig}>
+                <div className="config-section-title">
+                  <span>联网搜索</span>
+                  <em>
+                    {webSearchConfig?.source === "db"
+                      ? "已配置（本地）"
+                      : webSearchConfig?.source === "env"
+                        ? "已配置（环境变量）"
+                        : "未配置"}
+                  </em>
+                </div>
+                {webSearchConfig?.source === "env" && (
+                  <div className="config-message">
+                    当前 key 来自环境变量（.env 文件），优先级低于本地保存的 key。在下方填写新 key 保存后将覆盖。
+                  </div>
+                )}
+                <div className="config-grid">
+                  <label className="api-key-field">
+                    Tavily API key
+                    <input
+                      value={webSearchForm.api_key}
+                      type="password"
+                      onChange={(event) => setWebSearchForm({ ...webSearchForm, api_key: event.target.value })}
+                      placeholder={
+                        webSearchConfig?.source === "db"
+                          ? "留空则保留现有 key"
+                          : webSearchConfig?.source === "env"
+                            ? "填写后保存到本地（替代环境变量）"
+                            : "填写 Tavily API key"
+                      }
+                      disabled={webSearchSaveState === "saving"}
+                    />
+                  </label>
+                  <label>
+                    结果数量
+                    <input
+                      value={webSearchForm.max_results}
+                      type="number"
+                      min={1}
+                      max={10}
+                      onChange={(event) => setWebSearchForm({ ...webSearchForm, max_results: event.target.value })}
+                      disabled={webSearchSaveState === "saving"}
+                    />
+                  </label>
+                  <label>
+                    搜索深度
+                    <select value={webSearchForm.search_depth} onChange={(event) => setWebSearchForm({ ...webSearchForm, search_depth: event.target.value })} disabled={webSearchSaveState === "saving"}>
+                      <option value="basic">basic</option>
+                      <option value="advanced">advanced</option>
+                    </select>
+                  </label>
+                </div>
+                {webSearchSaveMessage && <div className={webSearchSaveState === "error" ? "config-message error" : "config-message"}>{webSearchSaveMessage}</div>}
+                <div className="config-actions">
+                  <button type="submit" disabled={webSearchSaveState === "saving"}>
+                    {webSearchSaveState === "saving" ? "保存中" : "保存搜索"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {userPanelOpen && (
+        <div className="user-modal-backdrop" onClick={() => setUserPanelOpen(false)}>
+          <section className="user-modal" role="dialog" aria-modal="true" aria-labelledby="user-modal-title" onClick={(event) => event.stopPropagation()}>
+            <div className="user-panel-header">
+              <strong id="user-modal-title">账号</strong>
+              <button type="button" onClick={() => setUserPanelOpen(false)} aria-label="关闭账号面板">
+                <X size={17} />
+              </button>
+            </div>
+            <div className="user-panel-scroll">
+              <div className="user-detail">
+                <span>当前账号</span>
+                <strong>{authUser?.username ?? "未登录"}</strong>
+              </div>
+              <div className="user-detail">
+                <span>数据范围</span>
+                <strong>当前账号独立数据</strong>
+              </div>
+              <div className="avatar-settings">
+                <label>
+                  用户头像
+                  <input value={userChatAvatar} onChange={(event) => updateChatAvatar("user", event.target.value)} placeholder="文字、emoji 或图片 URL" />
+                </label>
+                <label>
+                  LLM 头像
+                  <input value={assistantChatAvatar} onChange={(event) => updateChatAvatar("assistant", event.target.value)} placeholder="文字、emoji 或图片 URL" />
+                </label>
+              </div>
+              <form className="user-login-form" onSubmit={changeCurrentPassword}>
+                <label>
+                  当前密码
+                  <input
+                    value={passwordForm.currentPassword}
+                    type="password"
+                    onChange={(event) => setPasswordForm({ ...passwordForm, currentPassword: event.target.value })}
+                    autoComplete="current-password"
+                  />
+                </label>
+                <label>
+                  新密码
+                  <input
+                    value={passwordForm.newPassword}
+                    type="password"
+                    onChange={(event) => setPasswordForm({ ...passwordForm, newPassword: event.target.value })}
+                    autoComplete="new-password"
+                  />
+                </label>
+                <label>
+                  确认新密码
+                  <input
+                    value={passwordForm.confirmPassword}
+                    type="password"
+                    onChange={(event) => setPasswordForm({ ...passwordForm, confirmPassword: event.target.value })}
+                    autoComplete="new-password"
+                  />
+                </label>
+                <button type="submit">修改密码</button>
+              </form>
+            </div>
+            <div className="user-panel-actions">
+              <button type="button" className="user-secondary-action" onClick={logoutUser}>
+                退出登录
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </main>
   );
 }

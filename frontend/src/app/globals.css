@@ -630,17 +630,22 @@ textarea:focus {
   font-size: 13px;
 }
 
-.user-panel {
+.user-modal-backdrop {
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(32, 42, 49, 0.22);
+}
+
+.user-modal {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  position: absolute;
-  z-index: 12;
-  right: 8px;
-  bottom: 70px;
-  left: 8px;
   gap: 9px;
-  min-width: 0;
-  height: min(520px, calc(100vh - 96px));
+  width: min(520px, calc(100vw - 48px));
+  max-height: min(680px, calc(100vh - 48px));
   overflow: hidden;
   border: 1px solid rgba(158, 168, 176, 0.22);
   border-radius: 12px;
@@ -835,13 +840,21 @@ textarea:focus {
   background: #ffffff;
 }
 
-.config-panel {
+.config-modal-backdrop {
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(32, 42, 49, 0.22);
+}
+
+.config-modal {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  position: absolute;
-  z-index: 12;
-  inset: 154px 8px 8px;
-  min-width: 0;
+  width: min(760px, calc(100vw - 48px));
+  max-height: min(760px, calc(100vh - 48px));
   min-height: 0;
   border: 1px solid rgba(158, 168, 176, 0.22);
   border-radius: 14px;
@@ -1774,15 +1787,22 @@ textarea:focus {
     flex-direction: column;
   }
 
-  .config-panel {
-    inset: 148px 6px 6px;
+  .config-modal-backdrop {
+    padding: 12px;
   }
 
-  .user-panel {
-    right: 6px;
-    bottom: 66px;
-    left: 6px;
-    height: min(520px, calc(100vh - 82px));
+  .config-modal {
+    width: 100%;
+    max-height: calc(100vh - 24px);
+  }
+
+  .user-modal-backdrop {
+    padding: 12px;
+  }
+
+  .user-modal {
+    width: 100%;
+    max-height: calc(100vh - 24px);
   }
 
   .config-grid {
