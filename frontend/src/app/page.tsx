@@ -4,6 +4,7 @@ import { X } from "lucide-react";
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Panel, PanelGroup, PanelResizeHandle, type ImperativePanelHandle } from "react-resizable-panels";
+import { toast } from "sonner";
 
 import {
   changePassword,
@@ -32,7 +33,7 @@ import {
   updateWebSearchConfig,
 } from "@/lib/api";
 import { ChatWorkspace } from "@/components/ChatWorkspace";
-import { ConfigDialog, type ProviderProfileDraft } from "@/components/ConfigDialog";
+import { ConfigDialog, type ProviderProfileDraft, type ProviderProfileValues, type WebSearchValues } from "@/components/ConfigDialog";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { AuthPanel, type AuthMode as AuthPanelMode } from "@/components/AuthPanel";
 import { BidWorkflowPanel } from "@/components/BidWorkflowPanel";
@@ -117,12 +118,7 @@ export default function Home() {
   const [projectsOpen, setProjectsOpen] = useState(true);
   const [projectConversationsOpen, setProjectConversationsOpen] = useState(true);
   const [conversationsOpen, setConversationsOpen] = useState(true);
-  const [profileForm, setProfileForm] = useState<ProviderProfileDraft>(providerPresets[0]);
-  const [apiKey, setApiKey] = useState("");
   const [webSearchConfig, setWebSearchConfig] = useState<WebSearchConfig | null>(null);
-  const [webSearchForm, setWebSearchForm] = useState({ api_key: "", max_results: "5", search_depth: "basic" });
-  const [webSearchSaveState, setWebSearchSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
-  const [webSearchSaveMessage, setWebSearchSaveMessage] = useState("");
   const {
     workflow: activeBidWorkflow,
     setWorkflow: setActiveBidWorkflow,
@@ -158,6 +154,10 @@ export default function Home() {
     return recentConversations.filter((conversation) => conversation.project_id === defaultProject?.id);
   }, [defaultProject?.id, recentConversations]);
   const currentProfile = useMemo(() => profiles.find((profile) => profile.id === currentProfileId) ?? null, [profiles, currentProfileId]);
+  const configProfile = useMemo<ProviderProfileDraft>(
+    () => currentProfile ? { provider: currentProfile.provider, display_name: currentProfile.display_name, base_url: currentProfile.base_url, model: currentProfile.model } : providerPresets[0],
+    [currentProfile],
+  );
   const { models: providerModels, isLoading: isLoadingModels, error: providerModelsError } = useProviderModels(currentProfileId, modelMenuOpen);
 
   useEffect(() => {
@@ -174,19 +174,15 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    if (authMode !== "ready" || !error) return;
+    toast.error(error);
+    setError(null);
+  }, [authMode, error]);
+
+  useEffect(() => {
     setUserChatAvatar(window.localStorage.getItem("bid-writer-user-avatar") || "我");
     setAssistantChatAvatar(window.localStorage.getItem("bid-writer-assistant-avatar") || "AI");
   }, []);
-
-  useEffect(() => {
-    if (!configOpen || !currentProfile) return;
-    setProfileForm({
-      provider: currentProfile.provider,
-      display_name: currentProfile.display_name,
-      base_url: currentProfile.base_url,
-      model: currentProfile.model,
-    });
-  }, [configOpen, currentProfile]);
 
   useEffect(() => {
     setModelMenuOpen(false);
@@ -246,11 +242,6 @@ export default function Home() {
       setProjects(nextProjects);
       setProfiles(nextProfiles);
       setWebSearchConfig(nextWebSearchConfig);
-      setWebSearchForm({
-        api_key: "",
-        max_results: String(nextWebSearchConfig.max_results),
-        search_depth: nextWebSearchConfig.search_depth,
-      });
       const initialProject = nextProjects.find((project) => !project.workspace_path && project.title === "默认项目") ?? nextProjects.find((project) => !project.workspace_path) ?? nextProjects[0];
       setCurrentProjectId(initialProject?.id ?? null);
       setCurrentProfileId(nextProfiles[0]?.id ?? null);
@@ -659,54 +650,37 @@ export default function Home() {
     }
   }
 
-  async function saveProfile(event: FormEvent) {
-    event.preventDefault();
+  async function saveProfile(values: ProviderProfileValues) {
     try {
       const existing = currentProfileId ? profiles.find((profile) => profile.id === currentProfileId) : null;
-      const payload = { ...profileForm, api_key: apiKey || undefined };
+      const payload = { ...values, api_key: values.api_key || undefined };
       const profile = existing ? await updateProviderProfile(existing.id, payload) : await createProviderProfile(payload);
       const nextProfiles = await listProviderProfiles();
       setProfiles(nextProfiles);
       setCurrentProfileId(profile.id);
-      setApiKey("");
       setConfigOpen(false);
       setError(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
     }
   }
 
-  async function saveWebSearchConfig(event: FormEvent) {
-    event.preventDefault();
-    setWebSearchSaveState("saving");
-    setWebSearchSaveMessage("");
+  async function saveWebSearchConfig(values: WebSearchValues): Promise<WebSearchConfig> {
     try {
-      const apiKeyValue = webSearchForm.api_key.trim();
+      const apiKeyValue = values.api_key.trim();
       const updated = await updateWebSearchConfig({
         api_key: apiKeyValue || undefined,
-        max_results: Number(webSearchForm.max_results) || undefined,
-        search_depth: webSearchForm.search_depth,
+        max_results: Number(values.max_results),
+        search_depth: values.search_depth,
       });
       setWebSearchConfig(updated);
-      setWebSearchForm({ api_key: "", max_results: String(updated.max_results), search_depth: updated.search_depth });
-      setWebSearchSaveState("saved");
-      setWebSearchSaveMessage(apiKeyValue ? "搜索配置已保存。" : "搜索配置已保存。");
       setError(null);
-      window.setTimeout(() => {
-        setWebSearchSaveState((current) => (current === "saved" ? "idle" : current));
-        setWebSearchSaveMessage((current) => (current === "搜索配置已保存。" || current === "搜索配置已保存。" ? "" : current));
-      }, 3000);
+      return updated;
     } catch (caught) {
-      const message = caught instanceof Error ? caught.message : String(caught);
-      setWebSearchSaveState("error");
-      setWebSearchSaveMessage(message);
-      setError(message);
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
     }
-  }
-
-  function choosePreset(provider: string) {
-    const preset = providerPresets.find((item) => item.provider === provider) ?? providerPresets[0];
-    setProfileForm(preset);
   }
 
   function openConfigPanel() {
@@ -714,8 +688,6 @@ export default function Home() {
     setUserPanelOpen(false);
     setModelMenuOpen(false);
     setAttachmentMenuOpen(false);
-    setWebSearchSaveState("idle");
-    setWebSearchSaveMessage("");
   }
 
   function toggleUserPanel() {
@@ -771,7 +743,6 @@ export default function Home() {
     setMessages([]);
     setProfiles([]);
     setWebSearchConfig(null);
-    setWebSearchForm({ api_key: "", max_results: "5", search_depth: "basic" });
     setWebSearchEnabled(false);
     setCurrentProjectId(null);
     setCurrentConversationId(null);
@@ -802,12 +773,6 @@ export default function Home() {
       const nextProfiles = await listProviderProfiles();
       setProfiles(nextProfiles);
       setCurrentProfileId(updated.id);
-      setProfileForm({
-        provider: updated.provider,
-        display_name: updated.display_name,
-        base_url: updated.base_url,
-        model: updated.model,
-      });
       setModelMenuOpen(false);
       setError(null);
     } catch (caught) {
@@ -875,7 +840,6 @@ export default function Home() {
       <PanelResizeHandle className="sidebar-resize-handle" hitAreaMargins={{ coarse: 16, fine: 8 }} />
       <Panel id="workbench-chat" order={2} minSize={40}>
         <ChatWorkspace
-          error={error}
           messages={messages}
           currentProjectTitle={currentProject?.title ?? null}
           currentConversationTitle={currentConversation?.title ?? null}
@@ -920,17 +884,9 @@ export default function Home() {
         open={configOpen}
         onOpenChange={setConfigOpen}
         presets={providerPresets}
-        profile={profileForm}
-        apiKey={apiKey}
-        onProfileChange={setProfileForm}
-        onApiKeyChange={setApiKey}
-        onPresetChange={choosePreset}
+        profile={configProfile}
         onSaveProfile={saveProfile}
         webSearchConfig={webSearchConfig}
-        webSearchForm={webSearchForm}
-        webSearchSaveState={webSearchSaveState}
-        webSearchSaveMessage={webSearchSaveMessage}
-        onWebSearchFormChange={setWebSearchForm}
         onSaveWebSearch={saveWebSearchConfig}
       />
 

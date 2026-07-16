@@ -9,7 +9,6 @@ import type { ProviderModel, WebSearchConfig, WorkbenchMessage } from "@/lib/typ
 import styles from "./ChatWorkspace.module.css";
 
 type ChatWorkspaceProps = {
-  error: string | null;
   messages: WorkbenchMessage[];
   currentProjectTitle: string | null;
   currentConversationTitle: string | null;
@@ -54,7 +53,6 @@ function avatarContent(value: string) {
 }
 
 export function ChatWorkspace({
-  error,
   messages,
   currentProjectTitle,
   currentConversationTitle,
@@ -179,7 +177,6 @@ export function ChatWorkspace({
 
   return (
     <section className={`${styles.workspace} chat-workspace`}>
-      {error && <div className="error-banner">{error}</div>}
       {messages.length === 0 ? (
         <div className="landing-stage">
           <h1>今天想聊什么？</h1>
