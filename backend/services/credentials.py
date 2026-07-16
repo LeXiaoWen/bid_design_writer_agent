@@ -22,6 +22,10 @@ class CredentialStore:
 class KeyringCredentialStore(CredentialStore):
     service_name = "bid-design-writer-desktop"
 
+    def __init__(self) -> None:
+        self._cache: dict[str, str | None] = {}
+        self._lock = RLock()
+
     def _keyring(self):
         try:
             import keyring
@@ -31,11 +35,16 @@ class KeyringCredentialStore(CredentialStore):
         return keyring, (KeyringError, NoKeyringError)
 
     def get(self, key: str) -> str | None:
-        keyring, errors = self._keyring()
-        try:
-            return keyring.get_password(self.service_name, key)
-        except errors as exc:
-            raise CredentialStoreUnavailable("系统凭据库不可用，请启用 Keychain、Credential Manager 或 Secret Service。") from exc
+        with self._lock:
+            if key in self._cache:
+                return self._cache[key]
+            keyring, errors = self._keyring()
+            try:
+                value = keyring.get_password(self.service_name, key)
+            except errors as exc:
+                raise CredentialStoreUnavailable("系统凭据库不可用，请启用 Keychain、Credential Manager 或 Secret Service。") from exc
+            self._cache[key] = value
+            return value
 
     def set(self, key: str, value: str) -> None:
         keyring, errors = self._keyring()
@@ -43,6 +52,8 @@ class KeyringCredentialStore(CredentialStore):
             keyring.set_password(self.service_name, key, value)
         except errors as exc:
             raise CredentialStoreUnavailable("系统凭据库不可用，未保存密钥。") from exc
+        with self._lock:
+            self._cache[key] = value
 
     def delete(self, key: str) -> None:
         keyring, errors = self._keyring()
@@ -52,6 +63,8 @@ class KeyringCredentialStore(CredentialStore):
             # A missing entry is already the desired result; other errors are actionable.
             if exc.__class__.__name__ != "PasswordDeleteError":
                 raise CredentialStoreUnavailable("系统凭据库不可用，未能删除密钥。") from exc
+        with self._lock:
+            self._cache.pop(key, None)
 
 
 class MemoryCredentialStore(CredentialStore):

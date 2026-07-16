@@ -7,24 +7,18 @@ import {
   FileText,
   FolderOpen,
   Globe2,
-  History,
   Loader2,
-  MessageSquarePlus,
-  PanelLeftClose,
-  PanelLeftOpen,
   Plus,
-  Search,
   Send,
-  Settings2,
   ShieldCheck,
   Square,
-  Trash2,
   X,
 } from "lucide-react";
-import { ChangeEvent, CSSProperties, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useQuery } from "@tanstack/react-query";
+import { Panel, PanelGroup, PanelResizeHandle, type ImperativePanelHandle } from "react-resizable-panels";
 
 import {
   changePassword,
@@ -63,6 +57,7 @@ import {
 import { MarkdownPane } from "@/components/MarkdownPane";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { AuthPanel, type AuthMode as AuthPanelMode } from "@/components/AuthPanel";
+import { WorkbenchSidebar } from "@/components/WorkbenchSidebar";
 import { useChatStream } from "@/hooks/useChatStream";
 import type {
   AuthUser,
@@ -124,19 +119,6 @@ async function getAuthStatusWithRetry() {
   throw lastError instanceof Error ? lastError : new Error("本地后端启动超时，请重新打开应用。");
 }
 
-function relativeTime(value: string): string {
-  const timestamp = new Date(value).getTime();
-  if (!Number.isFinite(timestamp)) return "";
-  const diffMs = Date.now() - timestamp;
-  const minutes = Math.max(0, Math.round(diffMs / 60_000));
-  if (minutes < 1) return "刚刚";
-  if (minutes < 60) return `${minutes} 分`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours} 小时`;
-  const days = Math.round(hours / 24);
-  return `${days} 天`;
-}
-
 function formatMessageTime(value: string): string {
   const timestamp = new Date(value).getTime();
   if (!Number.isFinite(timestamp)) return "";
@@ -154,12 +136,6 @@ function sanitizeFilename(value: string): string {
 
 function stripExtension(value: string): string {
   return value.replace(/\.[^.]+$/, "");
-}
-
-function userInitials(user: AuthUser | null): string {
-  const name = user?.username.trim();
-  if (!name) return "未";
-  return name.slice(0, 2).toUpperCase();
 }
 
 function workflowStatusText(status: BidWorkflow["status"]): string {
@@ -191,8 +167,6 @@ function avatarContent(value: string) {
 
 export default function Home() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [sidebarWidth, setSidebarWidth] = useState(300);
-  const [isResizingSidebar, setIsResizingSidebar] = useState(false);
   const [projects, setProjects] = useState<WorkbenchProject[]>([]);
   const [projectConversations, setProjectConversations] = useState<WorkbenchConversation[]>([]);
   const [recentConversations, setRecentConversations] = useState<WorkbenchConversation[]>([]);
@@ -236,6 +210,7 @@ export default function Home() {
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const sidebarPanelRef = useRef<ImperativePanelHandle>(null);
 
   const currentProject = useMemo(() => projects.find((project) => project.id === currentProjectId) ?? null, [projects, currentProjectId]);
   const currentConversation = useMemo(
@@ -267,37 +242,6 @@ export default function Home() {
     window.addEventListener("ai-workbench-auth-expired", handleAuthExpired);
     return () => window.removeEventListener("ai-workbench-auth-expired", handleAuthExpired);
   }, []);
-
-  useEffect(() => {
-    const savedWidth = Number(window.localStorage.getItem("bid-writer-sidebar-width"));
-    if (Number.isFinite(savedWidth) && savedWidth >= 250 && savedWidth <= 440) {
-      setSidebarWidth(savedWidth);
-    }
-  }, []);
-
-  useEffect(() => {
-    window.localStorage.setItem("bid-writer-sidebar-width", String(sidebarWidth));
-  }, [sidebarWidth]);
-
-  useEffect(() => {
-    if (!isResizingSidebar) return;
-
-    const resizeSidebar = (event: PointerEvent) => {
-      setSidebarWidth(Math.min(440, Math.max(250, event.clientX)));
-    };
-    const stopResizing = () => setIsResizingSidebar(false);
-
-    document.addEventListener("pointermove", resizeSidebar);
-    document.addEventListener("pointerup", stopResizing);
-    document.body.style.userSelect = "none";
-    document.body.style.cursor = "col-resize";
-    return () => {
-      document.removeEventListener("pointermove", resizeSidebar);
-      document.removeEventListener("pointerup", stopResizing);
-      document.body.style.userSelect = "";
-      document.body.style.cursor = "";
-    };
-  }, [isResizingSidebar]);
 
   useEffect(() => {
     setUserChatAvatar(window.localStorage.getItem("bid-writer-user-avatar") || "我");
@@ -446,8 +390,16 @@ export default function Home() {
     await refreshConversations(project.id);
   }
 
+  function toggleSidebar() {
+    if (sidebarCollapsed) {
+      sidebarPanelRef.current?.expand(22);
+    } else {
+      sidebarPanelRef.current?.collapse();
+    }
+  }
+
   async function chooseWorkspaceDirectory() {
-    setSidebarCollapsed(false);
+    sidebarPanelRef.current?.expand(22);
     setError(null);
     const selected = await window.bidDesignWriterDesktop?.selectDirectory();
     if (!selected) {
@@ -1226,180 +1178,41 @@ export default function Home() {
 
   return (
     <ErrorBoundary>
-    <main
-      className="workbench-shell"
-      data-sidebar={sidebarCollapsed ? "collapsed" : "expanded"}
-      style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
-    >
-      <aside className="sidebar">
-        <div className="sidebar-top">
-          {!sidebarCollapsed && <div className="app-mark">建筑设计标书方案助手</div>}
-          <button className="ghost-icon" onClick={() => setSidebarCollapsed((current) => !current)} aria-label="折叠菜单">
-            {sidebarCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
-          </button>
-        </div>
-
-        <div className="menu-block">
-          <button className="menu-command" onClick={startNewChat} title="新对话">
-            <MessageSquarePlus size={19} />
-            {!sidebarCollapsed && <span>新对话</span>}
-          </button>
-          <button className="menu-command" onClick={() => setSearchQuery((current) => current || " ")} title="搜索">
-            <Search size={19} />
-            {!sidebarCollapsed && <span>搜索</span>}
-          </button>
-          <button className="menu-command" onClick={openConfigPanel} title="模型配置">
-            <Settings2 size={19} />
-            {!sidebarCollapsed && <span>模型配置</span>}
-          </button>
-        </div>
-
-        <div className="sidebar-section">
-          {!sidebarCollapsed && (
-            <button className="section-label section-toggle" onClick={() => setProjectsOpen((current) => !current)}>
-              项目
-              <ChevronRight className={projectsOpen ? "chevron open" : "chevron"} size={15} />
-            </button>
-          )}
-          {!sidebarCollapsed && (
-            <div className="search-box">
-              <Search size={16} />
-              <input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="搜索项目、历史对话" />
-            </div>
-          )}
-          {!sidebarCollapsed && searchResults.length > 0 && (
-            <div className="search-results">
-              {searchResults.map((result) => (
-                <button key={`${result.kind}-${result.id}`} onClick={() => result.conversation_id && openConversation(result.conversation_id)}>
-                  <strong>{result.title}</strong>
-                  <span>{result.excerpt}</span>
-                </button>
-              ))}
-            </div>
-          )}
-          {projectsOpen && (
-            <div className="nav-list">
-              {!sidebarCollapsed && (
-                <button type="button" className="workspace-picker-row" onClick={chooseWorkspaceDirectory}>
-                  <FolderOpen size={17} />
-                  <span>选择本地文件夹</span>
-                </button>
-              )}
-              {projects.map((project) => (
-                <div className="project-group" key={project.id}>
-                  <div className={project.id === currentProjectId ? "sidebar-item-shell project-shell active" : "sidebar-item-shell"}>
-                    <button
-                      className="project-row"
-                      onClick={() => switchProject(project)}
-                      title={project.workspace_path ? `${project.title}\n${project.workspace_path}` : project.title}
-                    >
-                      <FileText size={18} />
-                      {!sidebarCollapsed && <span>{project.title}</span>}
-                    </button>
-                    {!sidebarCollapsed && project.workspace_path && project.id === currentProjectId && (
-                      <button
-                        type="button"
-                        className="project-expand-toggle"
-                        onClick={() => setProjectConversationsOpen((current) => !current)}
-                        aria-label={projectConversationsOpen ? `收起 ${project.title} 的对话` : `展开 ${project.title} 的对话`}
-                      >
-                        <ChevronRight className={projectConversationsOpen ? "chevron open" : "chevron"} size={15} />
-                      </button>
-                    )}
-                    {!sidebarCollapsed && (
-                      <button type="button" className="row-delete" onClick={() => removeProject(project)} aria-label={`删除项目 ${project.title}`}>
-                        <Trash2 size={14} />
-                      </button>
-                    )}
-                  </div>
-                    {!sidebarCollapsed &&
-                    project.workspace_path &&
-                    project.id === currentProjectId &&
-                    projectConversationsOpen &&
-                    projectPreviewConversations.map((conversation) => (
-                      <div className={conversation.id === currentConversationId ? "sidebar-item-shell project-chat-shell active" : "sidebar-item-shell project-chat-shell"} key={conversation.id}>
-                        <button className="project-chat-row" onClick={() => openConversation(conversation.id)} title={conversation.title}>
-                          <span>{conversation.title}</span>
-                          <time>{relativeTime(conversation.updated_at)}</time>
-                        </button>
-                        <button type="button" className="row-delete" onClick={() => removeConversation(conversation)} aria-label={`删除对话 ${conversation.title}`}>
-                          <Trash2 size={14} />
-                        </button>
-                      </div>
-                    ))}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="sidebar-section grow">
-          {!sidebarCollapsed && (
-            <button className="section-label section-toggle" onClick={() => setConversationsOpen((current) => !current)}>
-              对话
-              <ChevronRight className={conversationsOpen ? "chevron open" : "chevron"} size={15} />
-            </button>
-          )}
-          {conversationsOpen && (
-            <div className="nav-list history-list">
-              {sidebarHistoryConversations.length === 0 && !sidebarCollapsed ? (
-                <div className="empty-sidebar">暂无其他对话</div>
-              ) : (
-                sidebarHistoryConversations.map((conversation) => (
-                  <div className={conversation.id === currentConversationId ? "sidebar-item-shell conversation-shell active" : "sidebar-item-shell conversation-shell"} key={conversation.id}>
-                    <button className="conversation-row" onClick={() => openConversation(conversation.id)} title={conversation.title}>
-                      <History size={16} />
-                      {!sidebarCollapsed && <span>{conversation.title}</span>}
-                      {!sidebarCollapsed && <time>{relativeTime(conversation.updated_at)}</time>}
-                    </button>
-                    {!sidebarCollapsed && (
-                      <button type="button" className="row-delete" onClick={() => removeConversation(conversation)} aria-label={`删除对话 ${conversation.title}`}>
-                        <Trash2 size={14} />
-                      </button>
-                    )}
-                  </div>
-                ))
-              )}
-            </div>
-          )}
-        </div>
-
-        <button type="button" className="account-card" onClick={toggleUserPanel} title="用户信息">
-          <div className="account-avatar">{userInitials(authUser)}</div>
-          {!sidebarCollapsed && (
-            <div className="account-copy">
-              <strong>{authUser?.username ?? "未登录"}</strong>
-              <span>本机账号</span>
-            </div>
-          )}
-          {!sidebarCollapsed && <ChevronRight className={userPanelOpen ? "chevron open" : "chevron"} size={16} />}
-        </button>
-        {!sidebarCollapsed && (
-          <div
-            className="sidebar-resize-handle"
-            role="separator"
-            aria-label="调整侧边栏宽度"
-            aria-orientation="vertical"
-            tabIndex={0}
-            onPointerDown={(event) => {
-              event.preventDefault();
-              setIsResizingSidebar(true);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "ArrowLeft") {
-                event.preventDefault();
-                setSidebarWidth((current) => Math.max(250, current - 16));
-              }
-              if (event.key === "ArrowRight") {
-                event.preventDefault();
-                setSidebarWidth((current) => Math.min(440, current + 16));
-              }
-            }}
-          />
-        )}
-      </aside>
-
-      <section className="chat-workspace">
+    <PanelGroup className="workbench-shell" data-sidebar={sidebarCollapsed ? "collapsed" : "expanded"} direction="horizontal" autoSaveId="bid-writer-workbench-layout">
+      <Panel ref={sidebarPanelRef} id="workbench-sidebar" order={1} defaultSize={22} minSize={18} maxSize={36} collapsible collapsedSize={6} onCollapse={() => setSidebarCollapsed(true)} onExpand={() => setSidebarCollapsed(false)}>
+        <WorkbenchSidebar
+          collapsed={sidebarCollapsed}
+          projects={projects}
+          currentProjectId={currentProjectId}
+          currentConversationId={currentConversationId}
+          projectPreviewConversations={projectPreviewConversations}
+          historyConversations={sidebarHistoryConversations}
+          searchQuery={searchQuery}
+          searchResults={searchResults}
+          projectsOpen={projectsOpen}
+          projectConversationsOpen={projectConversationsOpen}
+          conversationsOpen={conversationsOpen}
+          authUser={authUser}
+          userPanelOpen={userPanelOpen}
+          onToggleSidebar={toggleSidebar}
+          onStartNewChat={startNewChat}
+          onFocusSearch={() => setSearchQuery((current) => current || " ")}
+          onOpenConfig={openConfigPanel}
+          onSearchQueryChange={setSearchQuery}
+          onToggleProjects={() => setProjectsOpen((current) => !current)}
+          onChooseWorkspace={chooseWorkspaceDirectory}
+          onSwitchProject={switchProject}
+          onToggleProjectConversations={() => setProjectConversationsOpen((current) => !current)}
+          onRemoveProject={removeProject}
+          onOpenConversation={openConversation}
+          onRemoveConversation={removeConversation}
+          onToggleConversations={() => setConversationsOpen((current) => !current)}
+          onToggleUserPanel={toggleUserPanel}
+        />
+      </Panel>
+      <PanelResizeHandle className="sidebar-resize-handle" hitAreaMargins={{ coarse: 16, fine: 8 }} />
+      <Panel id="workbench-chat" order={2} minSize={40}>
+        <section className="chat-workspace">
         {error && <div className="error-banner">{error}</div>}
 
         {messages.length === 0 ? (
@@ -1656,7 +1469,8 @@ export default function Home() {
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
-    </main>
+      </Panel>
+    </PanelGroup>
     </ErrorBoundary>
   );
 }

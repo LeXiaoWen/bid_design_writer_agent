@@ -66,6 +66,15 @@ textarea:focus {
   grid-template-columns: 74px minmax(0, 1fr);
 }
 
+.workbench-shell > [data-panel] {
+  min-width: 0;
+  min-height: 0;
+}
+
+.workbench-shell > [data-panel] > .chat-workspace {
+  height: 100%;
+}
+
 .auth-screen {
   display: grid;
   min-height: 100vh;
@@ -1026,11 +1035,9 @@ textarea:focus {
 }
 
 .sidebar-resize-handle {
-  position: absolute;
+  position: relative;
   z-index: 18;
-  top: 0;
-  right: -4px;
-  bottom: 0;
+  flex: 0 0 8px;
   width: 8px;
   cursor: col-resize;
 }
@@ -1752,6 +1759,14 @@ textarea:focus {
     box-shadow: 18px 0 44px rgba(69, 82, 93, 0.14);
     transform: translateX(0);
     transition: transform 160ms ease;
+  }
+
+  .workbench-shell > [data-panel]:first-of-type {
+    flex: 0 0 0 !important;
+  }
+
+  .workbench-shell > [data-panel]:last-of-type {
+    flex: 1 1 100% !important;
   }
 
   .sidebar-resize-handle {

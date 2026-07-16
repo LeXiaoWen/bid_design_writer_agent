@@ -2,6 +2,7 @@ from agno.agent import Agent
 from agno.agent import RunContentEvent
 from agno.models.openai import OpenAIChat
 from collections.abc import Callable
+from typing import Optional
 
 from ..schemas import ApiConfig
 
@@ -32,7 +33,7 @@ def run_agent(
     api_config: ApiConfig,
     instructions: str,
     prompt: str,
-    on_delta: Callable[[str], None] | None = None,
+    on_delta: Optional[Callable[[str], None]] = None,
 ) -> str:
     agent = create_agent(api_config, instructions)
     if on_delta is not None:
