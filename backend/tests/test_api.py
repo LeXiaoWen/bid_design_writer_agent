@@ -444,9 +444,13 @@ def test_bid_workflow_v1_full_chain(monkeypatch):
     )
     profile_id = created_profile.json()["id"]
     seen_models = []
+    streamed_progress = []
 
-    def fake_run_agent(api_config, instructions, prompt):
+    def fake_run_agent(api_config, instructions, prompt, on_delta=None):
         seen_models.append(api_config.model)
+        if on_delta:
+            on_delta("模型响应" * 80)
+            streamed_progress.append(workbench_store.get_bid_execution(workflow_id).progress)
         if "阶段二" in prompt:
             return "## 方案正文\n内容\n## 绘图提示词 + 专业图纸需求清单\n提示词"
         return "# 测试项目 — 招标文件信息提取\n\n## 四、标书制作规范\n字体要求"
@@ -494,6 +498,7 @@ def test_bid_workflow_v1_full_chain(monkeypatch):
     assert completed["template_choice"] == "auto"
     assert len(completed["artifacts"]) == 4
     assert seen_models == ["deepseek-chat", "deepseek-chat"]
+    assert all(progress > 20 for progress in streamed_progress)
 
     listed = client.get("/api/v1/bid-workflows", params={"conversation_id": conversation_id})
     assert listed.status_code == 200

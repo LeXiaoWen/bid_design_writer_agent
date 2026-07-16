@@ -1,5 +1,7 @@
 from agno.agent import Agent
+from agno.agent import RunContentEvent
 from agno.models.openai import OpenAIChat
+from collections.abc import Callable
 
 from ..schemas import ApiConfig
 
@@ -26,7 +28,20 @@ def create_agent(api_config: ApiConfig, instructions: str) -> Agent:
     )
 
 
-def run_agent(api_config: ApiConfig, instructions: str, prompt: str) -> str:
+def run_agent(
+    api_config: ApiConfig,
+    instructions: str,
+    prompt: str,
+    on_delta: Callable[[str], None] | None = None,
+) -> str:
     agent = create_agent(api_config, instructions)
+    if on_delta is not None:
+        chunks: list[str] = []
+        for event in agent.run(prompt, stream=True):
+            if isinstance(event, RunContentEvent) and event.content:
+                chunk = str(event.content)
+                chunks.append(chunk)
+                on_delta(chunk)
+        return "".join(chunks).strip()
     response = agent.run(prompt)
     return str(getattr(response, "content", response)).strip()

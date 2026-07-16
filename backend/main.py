@@ -186,7 +186,28 @@ def workflow_is_cancelled(user_id: str, workflow_id: str) -> bool:
     return workbench_store.get_bid_workflow(user_id, workflow_id).status == BidWorkflowStatus.CANCELLED
 
 
-def run_bid_extraction_task(user_id: str, workflow_id: str) -> None:
+def bid_model_progress(job_id: str, stage: str):
+    received_chars = 0
+    reported_chars = 0
+    workbench_store.update_bid_job(job_id, progress=15, message="正在建立模型连接。")
+
+    def report(delta: str) -> None:
+        nonlocal received_chars, reported_chars
+        received_chars += len(delta)
+        if received_chars < reported_chars + 200:
+            return
+        reported_chars = received_chars
+        progress = min(90, 20 + received_chars // 100)
+        workbench_store.update_bid_job(
+            job_id,
+            progress=progress,
+            message=f"正在接收{stage}模型响应（{received_chars} 字）。",
+        )
+
+    return report
+
+
+def run_bid_extraction_task(user_id: str, workflow_id: str, job_id: str | None = None) -> None:
     workflow = workbench_store.get_bid_workflow(user_id, workflow_id)
     try:
         if workflow.status == BidWorkflowStatus.CANCELLED:
@@ -201,9 +222,14 @@ def run_bid_extraction_task(user_id: str, workflow_id: str) -> None:
 招标文件文本：
 {truncate_text(workflow.file_text)}
 """
-        result = run_agent(api_config, build_stage1_instructions(), prompt)
+        if job_id:
+            result = run_agent(api_config, build_stage1_instructions(), prompt, on_delta=bid_model_progress(job_id, "阶段一"))
+        else:
+            result = run_agent(api_config, build_stage1_instructions(), prompt)
         if workflow_is_cancelled(user_id, workflow_id):
             return
+        if job_id:
+            workbench_store.update_bid_job(job_id, progress=92, message="正在整理阶段一提取结果。")
         saved = workbench_store.save_bid_extraction(user_id, workflow_id, result)
         workbench_store.add_message(
             user_id,
@@ -216,7 +242,7 @@ def run_bid_extraction_task(user_id: str, workflow_id: str) -> None:
         workbench_store.add_message(user_id, failed.conversation_id, "assistant", f"阶段一提取失败：{exc}", status="error", error=str(exc))
 
 
-def run_bid_generation_task(user_id: str, workflow_id: str) -> None:
+def run_bid_generation_task(user_id: str, workflow_id: str, job_id: str | None = None) -> None:
     workflow = workbench_store.get_bid_workflow(user_id, workflow_id)
     try:
         if workflow.status == BidWorkflowStatus.CANCELLED:
@@ -235,9 +261,14 @@ def run_bid_generation_task(user_id: str, workflow_id: str) -> None:
 
 请执行阶段二：生成当前建筑设计范围内的完整方案。图文需求、制作规范汇总和其他附表仅在当前招标文件或已确认资料实际触发时输出。
 """
-        result = run_agent(api_config, build_stage2_instructions(), prompt)
+        if job_id:
+            result = run_agent(api_config, build_stage2_instructions(), prompt, on_delta=bid_model_progress(job_id, "阶段二"))
+        else:
+            result = run_agent(api_config, build_stage2_instructions(), prompt)
         if workflow_is_cancelled(user_id, workflow_id):
             return
+        if job_id:
+            workbench_store.update_bid_job(job_id, progress=92, message="正在生成成果文件。")
         files = build_output_files(workflow.extracted_markdown, result)
         workbench_store.save_bid_artifacts(user_id, workflow_id, files)
         completed = workbench_store.get_bid_workflow(user_id, workflow_id)
@@ -251,12 +282,12 @@ def run_bid_generation_task(user_id: str, workflow_id: str) -> None:
         workbench_store.add_message(user_id, failed.conversation_id, "assistant", f"阶段二生成失败：{exc}", status="error", error=str(exc))
 
 
-def run_bid_job(user_id: str, workflow_id: str, kind: str) -> None:
+def run_bid_job(job_id: str, user_id: str, workflow_id: str, kind: str) -> None:
     if kind == "extraction":
-        run_bid_extraction_task(user_id, workflow_id)
+        run_bid_extraction_task(user_id, workflow_id, job_id)
         return
     if kind == "generation":
-        run_bid_generation_task(user_id, workflow_id)
+        run_bid_generation_task(user_id, workflow_id, job_id)
         return
     raise ValueError(f"未知标书任务类型：{kind}")
 

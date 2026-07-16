@@ -9,7 +9,7 @@ from .workbench_store import workbench_store
 
 
 logger = logging.getLogger("bid_design_writer.jobs")
-JobRunner = Callable[[str, str, str], None]
+JobRunner = Callable[[str, str, str, str], None]
 
 
 class BidJobWorker:
@@ -55,7 +55,7 @@ class BidJobWorker:
     def _execute(self, job: dict[str, str]) -> None:
         try:
             workbench_store.update_bid_job(job["id"], progress=10, message="正在调用模型。")
-            self._runner(job["owner_user_id"], job["workflow_id"], job["kind"])
+            self._runner(job["id"], job["owner_user_id"], job["workflow_id"], job["kind"])
             workflow = workbench_store.get_bid_workflow(job["owner_user_id"], job["workflow_id"])
             state = (
                 BidExecutionState.CANCELLED

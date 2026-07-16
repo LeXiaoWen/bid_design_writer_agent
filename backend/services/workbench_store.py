@@ -818,9 +818,15 @@ class WorkbenchStore:
         if message is not None:
             assignments.append("message = ?")
             values.append(message)
-        values.append(job_id)
+        where = "id = ?"
+        if state is None:
+            where += " AND state = ?"
+            values.append(job_id)
+            values.append(BidExecutionState.RUNNING.value)
+        else:
+            values.append(job_id)
         with self._lock, self._connection:
-            self._execute(f"UPDATE bid_jobs SET {', '.join(assignments)} WHERE id = ?", values)
+            self._execute(f"UPDATE bid_jobs SET {', '.join(assignments)} WHERE {where}", values)
 
     def cancel_bid_jobs(self, workflow_id: str) -> None:
         self._execute(
