@@ -23,6 +23,9 @@ import {
 } from "lucide-react";
 import { ChangeEvent, CSSProperties, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import * as Tabs from "@radix-ui/react-tabs";
+import { useQuery } from "@tanstack/react-query";
 
 import {
   changePassword,
@@ -377,26 +380,31 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [searchQuery]);
 
+  const workflowQuery = useQuery({
+    queryKey: ["bid-workflow", activeBidWorkflow?.id],
+    queryFn: () => getBidWorkflow(activeBidWorkflow!.id),
+    enabled: Boolean(activeBidWorkflow?.id),
+    refetchInterval: (query) => (["extracting", "generating"].includes(query.state.data?.status ?? "") ? 1500 : false),
+  });
+
   useEffect(() => {
-    if (!activeBidWorkflow || !["extracting", "generating"].includes(activeBidWorkflow.status)) return;
-    const timer = window.setInterval(async () => {
-      try {
-        const workflow = await getBidWorkflow(activeBidWorkflow.id);
-        setActiveBidWorkflow(workflow);
-        setIsBidBusy(["extracting", "generating"].includes(workflow.status));
-        if (workflow.conversation_id === currentConversationId) {
-          setMessages(await listMessages(workflow.conversation_id));
-        }
-        if (!["extracting", "generating"].includes(workflow.status)) {
-          await refreshConversations(currentProjectId);
-        }
-      } catch (caught) {
-        setError(caught instanceof Error ? caught.message : String(caught));
-        setIsBidBusy(false);
-      }
-    }, 1500);
-    return () => window.clearInterval(timer);
-  }, [activeBidWorkflow, currentConversationId, currentProjectId]);
+    const workflow = workflowQuery.data;
+    if (!workflow) return;
+    setActiveBidWorkflow(workflow);
+    setIsBidBusy(["extracting", "generating"].includes(workflow.status));
+    if (workflow.conversation_id === currentConversationId) {
+      void listMessages(workflow.conversation_id).then(setMessages).catch((caught) => setError(caught instanceof Error ? caught.message : String(caught)));
+    }
+    if (!["extracting", "generating"].includes(workflow.status)) {
+      void refreshConversations(currentProjectId).catch((caught) => setError(caught instanceof Error ? caught.message : String(caught)));
+    }
+  }, [workflowQuery.data, currentConversationId, currentProjectId]);
+
+  useEffect(() => {
+    if (!workflowQuery.error) return;
+    setError(workflowQuery.error instanceof Error ? workflowQuery.error.message : String(workflowQuery.error));
+    setIsBidBusy(false);
+  }, [workflowQuery.error]);
 
   async function bootstrap() {
     try {
@@ -1021,33 +1029,25 @@ export default function Home() {
     <div className="composer-toolbar">
       <div className="toolbar-left">
         <input ref={fileInputRef} type="file" accept=".pdf,.docx,.txt,.md" className="hidden-file-input" onChange={uploadTenderFile} />
-        <div className="attachment-menu-wrap">
-          <button
-            type="button"
-            className="attachment-add-button"
-            onClick={() => setAttachmentMenuOpen((current) => !current)}
-            disabled={isBidBusy}
-            aria-label="添加"
-            aria-expanded={attachmentMenuOpen}
-          >
-            <Plus size={18} />
-          </button>
-          {attachmentMenuOpen && (
-            <div className="attachment-menu">
-              <button
-                type="button"
-                onClick={() => {
-                  setAttachmentMenuOpen(false);
-                  fileInputRef.current?.click();
-                }}
+        <DropdownMenu.Root open={attachmentMenuOpen} onOpenChange={setAttachmentMenuOpen}>
+          <DropdownMenu.Trigger asChild>
+            <button type="button" className="attachment-add-button" disabled={isBidBusy} aria-label="添加">
+              <Plus size={18} />
+            </button>
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content className="attachment-menu" side="top" align="start" sideOffset={8}>
+              <DropdownMenu.Item
+                className="attachment-menu-item"
                 disabled={isBidBusy}
+                onSelect={() => fileInputRef.current?.click()}
               >
                 <FileText size={16} />
                 <span>上传招标文件</span>
-              </button>
-            </div>
-          )}
-        </div>
+              </DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
         {uploadProgress !== null && (
           <div className="upload-progress" title={uploadFileName}>
             <span>{uploadProgress}%</span>
@@ -1089,13 +1089,21 @@ export default function Home() {
         </button>
       </div>
       <div className="toolbar-right">
-        <div className="model-picker">
-          <button type="button" className="model-select" onClick={openModelMenu} aria-expanded={modelMenuOpen}>
-            {currentProfile?.model ?? "选择模型"}
-            <ChevronRight className={modelMenuOpen ? "chevron open" : "chevron"} size={15} />
-          </button>
-          {modelMenuOpen && (
-            <div className="model-menu">
+        <DropdownMenu.Root
+          open={modelMenuOpen}
+          onOpenChange={(open) => {
+            if (open) void openModelMenu();
+            else setModelMenuOpen(false);
+          }}
+        >
+          <DropdownMenu.Trigger asChild>
+            <button type="button" className="model-select">
+              {currentProfile?.model ?? "选择模型"}
+              <ChevronRight className={modelMenuOpen ? "chevron open" : "chevron"} size={15} />
+            </button>
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content className="model-menu" side="top" align="end" sideOffset={8}>
               {isLoadingModels ? (
                 <div className="model-menu-status">
                   <Loader2 size={14} />
@@ -1105,19 +1113,18 @@ export default function Home() {
                 <div className="model-menu-status">未返回模型列表</div>
               ) : (
                 providerModels.map((model) => (
-                  <button
-                    type="button"
+                  <DropdownMenu.Item
                     className={model.id === currentProfile?.model ? "model-option active" : "model-option"}
                     key={model.id}
-                    onClick={() => chooseModel(model.id)}
+                    onSelect={() => chooseModel(model.id)}
                   >
                     {model.name || model.id}
-                  </button>
+                  </DropdownMenu.Item>
                 ))
               )}
-            </div>
-          )}
-        </div>
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
         {isStreaming ? (
           <button type="button" className="send-round" onClick={stopStreaming} aria-label="停止生成">
             <Square size={17} />
@@ -1239,14 +1246,12 @@ export default function Home() {
             <span>建筑设计标书方案助手</span>
             <h1>{authMode === "register" ? "注册" : "登录"}</h1>
           </div>
-          <div className="auth-tabs" role="tablist" aria-label="账号入口">
-            <button type="button" className={authMode === "login" ? "active" : ""} onClick={() => switchAuthMode("login")}>
-              登录
-            </button>
-            <button type="button" className={authMode === "register" ? "active" : ""} onClick={() => switchAuthMode("register")}>
-              注册
-            </button>
-          </div>
+          <Tabs.Root value={authMode} onValueChange={(value) => switchAuthMode(value as "login" | "register")}>
+            <Tabs.List className="auth-tabs" aria-label="账号入口">
+              <Tabs.Trigger value="login">登录</Tabs.Trigger>
+              <Tabs.Trigger value="register">注册</Tabs.Trigger>
+            </Tabs.List>
+          </Tabs.Root>
           <form className="auth-form" onSubmit={submitAuth}>
             <label>
               用户名

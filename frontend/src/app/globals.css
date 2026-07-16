@@ -122,7 +122,7 @@ textarea:focus {
   font-weight: 720;
 }
 
-.auth-tabs button.active {
+.auth-tabs button[data-state="active"] {
   background: #ffffff;
   color: #252a2f;
   box-shadow: 0 1px 5px rgba(42, 48, 54, 0.08);
@@ -1159,11 +1159,6 @@ textarea:focus {
   display: none;
 }
 
-.attachment-menu-wrap {
-  position: relative;
-  flex: 0 0 auto;
-}
-
 .attachment-add-button {
   display: grid;
   width: 34px;
@@ -1187,10 +1182,7 @@ textarea:focus {
 }
 
 .attachment-menu {
-  position: absolute;
   z-index: 10;
-  bottom: calc(100% + 8px);
-  left: 0;
   width: 176px;
   border: 1px solid rgba(158, 168, 176, 0.24);
   border-radius: 12px;
@@ -1199,7 +1191,7 @@ textarea:focus {
   padding: 6px;
 }
 
-.attachment-menu button {
+.attachment-menu-item {
   display: flex;
   width: 100%;
   align-items: center;
@@ -1214,7 +1206,8 @@ textarea:focus {
   font-weight: 720;
 }
 
-.attachment-menu button:hover {
+.attachment-menu-item:hover,
+.attachment-menu-item[data-highlighted] {
   background: rgba(116, 128, 138, 0.1);
   color: #20262b;
 }
@@ -1282,16 +1275,8 @@ textarea:focus {
   white-space: nowrap;
 }
 
-.model-picker {
-  position: relative;
-  min-width: 0;
-}
-
 .model-menu {
-  position: absolute;
   z-index: 12;
-  right: 0;
-  bottom: calc(100% + 10px);
   display: grid;
   width: min(340px, 78vw);
   max-height: 300px;
@@ -1318,6 +1303,7 @@ textarea:focus {
 }
 
 .model-option:hover,
+.model-option[data-highlighted],
 .model-option.active {
   background: #f0f4f6;
 }
