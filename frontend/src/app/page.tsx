@@ -22,6 +22,7 @@ import {
   X,
 } from "lucide-react";
 import { ChangeEvent, CSSProperties, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
 
 import {
   changePassword,
@@ -348,24 +349,6 @@ export default function Home() {
       model: currentProfile.model,
     });
   }, [configOpen, currentProfile]);
-
-  useEffect(() => {
-    if (!configOpen) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setConfigOpen(false);
-    };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [configOpen]);
-
-  useEffect(() => {
-    if (!userPanelOpen) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setUserPanelOpen(false);
-    };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [userPanelOpen]);
 
   useEffect(() => {
     setModelMenuOpen(false);
@@ -1556,17 +1539,18 @@ export default function Home() {
         )}
       </section>
 
-      {configOpen && (
-        <div className="config-modal-backdrop" onClick={() => setConfigOpen(false)}>
-          <section className="config-modal" role="dialog" aria-modal="true" aria-labelledby="config-modal-title" onClick={(event) => event.stopPropagation()}>
+      <Dialog.Root open={configOpen} onOpenChange={setConfigOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="config-modal-backdrop" />
+          <Dialog.Content className="config-modal" aria-describedby="config-modal-description">
             <div className="config-panel-header">
               <div>
-                <strong id="config-modal-title">模型与工具配置</strong>
-                <span>模型 API 和联网搜索仅保存在本机</span>
+                <Dialog.Title asChild><strong>模型与工具配置</strong></Dialog.Title>
+                <Dialog.Description asChild><span id="config-modal-description">模型 API 和联网搜索仅保存在本机</span></Dialog.Description>
               </div>
-              <button type="button" onClick={() => setConfigOpen(false)} aria-label="关闭模型配置">
+              <Dialog.Close asChild><button type="button" aria-label="关闭模型配置">
                 <X size={17} />
-              </button>
+              </button></Dialog.Close>
             </div>
             <div className="config-panel-scroll">
               <form className="config-section" onSubmit={saveProfile}>
@@ -1662,18 +1646,19 @@ export default function Home() {
                 </div>
               </form>
             </div>
-          </section>
-        </div>
-      )}
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
 
-      {userPanelOpen && (
-        <div className="user-modal-backdrop" onClick={() => setUserPanelOpen(false)}>
-          <section className="user-modal" role="dialog" aria-modal="true" aria-labelledby="user-modal-title" onClick={(event) => event.stopPropagation()}>
+      <Dialog.Root open={userPanelOpen} onOpenChange={setUserPanelOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="user-modal-backdrop" />
+          <Dialog.Content className="user-modal" aria-describedby={undefined}>
             <div className="user-panel-header">
-              <strong id="user-modal-title">账号</strong>
-              <button type="button" onClick={() => setUserPanelOpen(false)} aria-label="关闭账号面板">
+              <Dialog.Title asChild><strong>账号</strong></Dialog.Title>
+              <Dialog.Close asChild><button type="button" aria-label="关闭账号面板">
                 <X size={17} />
-              </button>
+              </button></Dialog.Close>
             </div>
             <div className="user-panel-scroll">
               <div className="user-detail">
@@ -1730,9 +1715,9 @@ export default function Home() {
                 退出登录
               </button>
             </div>
-          </section>
-        </div>
-      )}
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
     </main>
     </ErrorBoundary>
   );
