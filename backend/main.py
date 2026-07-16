@@ -3,13 +3,14 @@ import os
 import re
 from urllib.parse import quote, unquote
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from dotenv import load_dotenv
 
 from .schemas import (
     ApiConfig,
+    ArtifactVersion,
     AuthLoginRequest,
     AuthLoginResponse,
     AuthRegisterRequest,
@@ -27,6 +28,7 @@ from .schemas import (
     ProviderModelsResponse,
     ProviderProfileCreate,
     ProviderProfileUpdate,
+    RestoreCredentialsRequest,
     WorkbenchConversationCreate,
     WorkbenchConversationUpdate,
     WorkbenchProjectCreate,
@@ -38,9 +40,12 @@ from .services.artifacts import build_output_files, make_zip
 from .services.app_version import get_app_version
 from .services.auth import AuthRateLimitError, change_password, login_user, logout_token, register_user, user_from_token
 from .services.behavior_report import save_behavior_report
+from .services.bid_jobs import BidJobWorker
 from .services.config import API_PRESETS
+from .services.credentials import CredentialStoreUnavailable
 from .services.document_parser import parse_document
 from .services.llm import run_agent
+from .services.logging_config import configure_logging
 from .services.provider_models import list_provider_models as fetch_provider_models
 from .services.skill_loader import (
     build_stage1_instructions,
@@ -51,6 +56,7 @@ from .services.workbench_llm import cancel_run, stream_chat
 from .services.workbench_store import db_path, workbench_store
 
 load_dotenv()
+configure_logging()
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
@@ -73,6 +79,11 @@ app.add_middleware(
     allow_headers=["*"],
     allow_private_network=True,
 )
+
+
+@app.exception_handler(CredentialStoreUnavailable)
+async def credential_store_unavailable(_: Request, exc: CredentialStoreUnavailable):
+    return JSONResponse(status_code=503, content={"detail": str(exc), "code": "credential_store_unavailable"})
 
 PUBLIC_API_V1_PATHS = {
     "/api/v1/auth/status",
@@ -240,6 +251,39 @@ def run_bid_generation_task(user_id: str, workflow_id: str) -> None:
         workbench_store.add_message(user_id, failed.conversation_id, "assistant", f"阶段二生成失败：{exc}", status="error", error=str(exc))
 
 
+def run_bid_job(user_id: str, workflow_id: str, kind: str) -> None:
+    if kind == "extraction":
+        run_bid_extraction_task(user_id, workflow_id)
+        return
+    if kind == "generation":
+        run_bid_generation_task(user_id, workflow_id)
+        return
+    raise ValueError(f"未知标书任务类型：{kind}")
+
+
+bid_job_worker = BidJobWorker(run_bid_job)
+
+
+@app.on_event("startup")
+def start_bid_job_worker() -> None:
+    if os.getenv("AI_WORKBENCH_TEST_CREDENTIALS") != "1":
+        bid_job_worker.start()
+
+
+@app.on_event("shutdown")
+def stop_bid_job_worker() -> None:
+    bid_job_worker.stop()
+
+
+def enqueue_bid_job(user_id: str, workflow_id: str, kind: str) -> BidWorkflow:
+    workflow = workbench_store.enqueue_bid_job(user_id, workflow_id, kind)
+    if os.getenv("AI_WORKBENCH_TEST_CREDENTIALS") == "1":
+        bid_job_worker.run_pending()
+    else:
+        bid_job_worker.notify()
+    return workbench_store.get_bid_workflow(user_id, workflow.id)
+
+
 @app.get("/health")
 def health():
     return {
@@ -298,6 +342,15 @@ def change_auth_password(request: Request, payload: ChangePasswordRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True}
+
+
+@app.post("/api/v1/auth/restore-credentials")
+def restore_auth_credentials(request: Request, payload: RestoreCredentialsRequest):
+    try:
+        restored = workbench_store.restore_latest_legacy_secrets(current_user(request).id, payload.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "restored": restored}
 
 
 @app.get("/api/v1/projects")
@@ -491,7 +544,7 @@ def get_bid_workflow(workflow_id: str, request: Request):
 
 
 @app.post("/api/v1/bid-workflows/{workflow_id}/extract", response_model=BidWorkflowActionResponse)
-def extract_bid_workflow(workflow_id: str, request: Request, background_tasks: BackgroundTasks):
+def extract_bid_workflow(workflow_id: str, request: Request):
     user_id = current_user(request).id
     try:
         workflow = workbench_store.get_bid_workflow(user_id, workflow_id)
@@ -507,7 +560,7 @@ def extract_bid_workflow(workflow_id: str, request: Request, background_tasks: B
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     workbench_store.add_message(user_id, workflow.conversation_id, "assistant", "正在执行阶段一信息提取。")
-    background_tasks.add_task(run_bid_extraction_task, user_id, workflow_id)
+    workflow = enqueue_bid_job(user_id, workflow_id, "extraction")
     return BidWorkflowActionResponse(workflow=public_bid_workflow(workflow), message="阶段一信息提取已开始。")
 
 
@@ -535,7 +588,7 @@ def confirm_bid_workflow(workflow_id: str, request: Request, payload: BidWorkflo
 
 
 @app.post("/api/v1/bid-workflows/{workflow_id}/generate", response_model=BidWorkflowActionResponse)
-def generate_bid_workflow(workflow_id: str, request: Request, payload: BidWorkflowGenerateRequest, background_tasks: BackgroundTasks):
+def generate_bid_workflow(workflow_id: str, request: Request, payload: BidWorkflowGenerateRequest):
     user_id = current_user(request).id
     try:
         workflow = workbench_store.get_bid_workflow(user_id, workflow_id)
@@ -563,7 +616,7 @@ def generate_bid_workflow(workflow_id: str, request: Request, payload: BidWorkfl
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     workbench_store.add_message(user_id, workflow.conversation_id, "assistant", "正在按当前招标约束动态生成阶段二设计方案。")
-    background_tasks.add_task(run_bid_generation_task, user_id, workflow_id)
+    workflow = enqueue_bid_job(user_id, workflow_id, "generation")
     return BidWorkflowActionResponse(workflow=public_bid_workflow(workflow), message="阶段二设计方案生成已开始。")
 
 
@@ -577,6 +630,7 @@ def cancel_bid_workflow(workflow_id: str, request: Request):
         if workflow.status == BidWorkflowStatus.CANCELLED:
             return BidWorkflowActionResponse(workflow=public_bid_workflow(workflow), message="标书工作流已取消。")
         workflow = workbench_store.update_bid_workflow_status(user_id, workflow_id, BidWorkflowStatus.CANCELLED)
+        workbench_store.cancel_bid_jobs(workflow_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="标书工作流不存在。") from exc
     except ValueError as exc:
@@ -592,6 +646,23 @@ def list_bid_workflow_artifacts(workflow_id: str, request: Request):
         return workbench_store.list_bid_artifacts(current_user(request).id, workflow_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="标书工作流不存在。") from exc
+
+
+@app.get("/api/v1/bid-workflows/{workflow_id}/artifacts/versions", response_model=list[ArtifactVersion])
+def list_bid_workflow_artifact_versions(workflow_id: str, request: Request, name: str | None = Query(default=None)):
+    try:
+        return workbench_store.list_bid_artifact_versions(current_user(request).id, workflow_id, name)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="标书工作流不存在。") from exc
+
+
+@app.post("/api/v1/bid-workflows/{workflow_id}/artifacts/{name}/versions/{version}/restore")
+def restore_bid_workflow_artifact_version(workflow_id: str, name: str, version: int, request: Request):
+    try:
+        workbench_store.restore_bid_artifact_version(current_user(request).id, workflow_id, unquote(name), version)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="成果版本不存在。") from exc
+    return {"ok": True}
 
 
 @app.get("/api/v1/bid-workflows/{workflow_id}/artifacts/{name}")

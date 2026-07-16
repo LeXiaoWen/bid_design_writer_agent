@@ -15,6 +15,8 @@ from .workbench_store import workbench_store
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-4o"
+CONTEXT_CHARACTER_BUDGET = 24_000
+RECENT_CONTEXT_MESSAGES = 12
 
 _cancel_events: dict[str, tuple[str, asyncio.Event]] = {}
 
@@ -35,6 +37,16 @@ def cancel_run(user_id: str, run_id: str) -> bool:
 def _normalize_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
     allowed_roles = {"system", "user", "assistant"}
     return [message for message in messages if message.get("role") in allowed_roles]
+
+
+def _build_context_summary(existing: str, messages: list[Any]) -> str:
+    lines = [existing] if existing else []
+    for message in messages:
+        content = " ".join(message.content.split())
+        if content:
+            lines.append(f"{message.role}: {content[:800]}")
+    # Keep enough room for the live context while retaining durable decisions.
+    return "\n".join(lines)[-8_000:]
 
 
 async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator[str]:
@@ -61,6 +73,13 @@ async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator
         )
 
     previous_messages = workbench_store.list_messages(user_id, conversation.id)
+    context_summary = workbench_store.get_context_summary(user_id, conversation.id)
+    history_size = sum(len(message.content) for message in previous_messages)
+    if history_size > CONTEXT_CHARACTER_BUDGET:
+        archived_messages = previous_messages[:-RECENT_CONTEXT_MESSAGES]
+        context_summary = _build_context_summary(context_summary, archived_messages)
+        workbench_store.set_context_summary(user_id, conversation.id, context_summary)
+        previous_messages = previous_messages[-RECENT_CONTEXT_MESSAGES:]
     user_message = workbench_store.add_message(user_id, conversation.id, "user", request.message)
 
     # 若该对话存在标书工作流，用户每条消息都保存行为摘要
@@ -112,6 +131,8 @@ async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator
     system_parts: list[str] = []
     if request.system_prompt:
         system_parts.append(request.system_prompt)
+    if context_summary:
+        system_parts.append(f"以下是较早对话的持久化摘要，请将其作为上下文，不要逐字复述：\n{context_summary}")
     if request.web_search_enabled:
         try:
             search_results = await tavily_search(user_id, request.message)

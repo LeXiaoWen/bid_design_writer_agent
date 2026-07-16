@@ -59,6 +59,7 @@ import {
   updateWebSearchConfig,
 } from "@/lib/api";
 import { MarkdownPane } from "@/components/MarkdownPane";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import type {
   AuthUser,
   BidWorkflow,
@@ -174,6 +175,12 @@ function workflowStatusText(status: BidWorkflow["status"]): string {
     cancelled: "已取消",
   };
   return labels[status];
+}
+
+function workflowExecutionText(workflow: BidWorkflow): string {
+  const execution = workflow.execution;
+  if (!execution) return workflowStatusText(workflow.status);
+  return `${execution.message || workflowStatusText(workflow.status)}${execution.state === "running" ? ` ${execution.progress}%` : ""}`;
 }
 
 function avatarContent(value: string) {
@@ -1148,7 +1155,7 @@ export default function Home() {
       <section className="workflow-panel">
         <div className="workflow-header">
           <div>
-            <span>{workflowStatusText(activeBidWorkflow.status)}</span>
+            <span>{workflowExecutionText(activeBidWorkflow)}</span>
             <strong>{activeBidWorkflow.file_name}</strong>
           </div>
           <div className="workflow-header-tools">
@@ -1299,6 +1306,7 @@ export default function Home() {
   }
 
   return (
+    <ErrorBoundary>
     <main
       className="workbench-shell"
       data-sidebar={sidebarCollapsed ? "collapsed" : "expanded"}
@@ -1600,8 +1608,8 @@ export default function Home() {
                 <div className="config-section-title">
                   <span>联网搜索</span>
                   <em>
-                    {webSearchConfig?.source === "db"
-                      ? "已配置（本地）"
+                    {webSearchConfig?.source === "system"
+                      ? "已配置（系统凭据库）"
                       : webSearchConfig?.source === "env"
                         ? "已配置（环境变量）"
                         : "未配置"}
@@ -1620,8 +1628,8 @@ export default function Home() {
                       type="password"
                       onChange={(event) => setWebSearchForm({ ...webSearchForm, api_key: event.target.value })}
                       placeholder={
-                        webSearchConfig?.source === "db"
-                          ? "留空则保留现有 key"
+                        webSearchConfig?.source === "system"
+                          ? "留空则保留系统凭据库中的 key"
                           : webSearchConfig?.source === "env"
                             ? "填写后保存到本地（替代环境变量）"
                             : "填写 Tavily API key"
@@ -1728,5 +1736,6 @@ export default function Home() {
         </div>
       )}
     </main>
+    </ErrorBoundary>
   );
 }

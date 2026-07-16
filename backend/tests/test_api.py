@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 os.environ["AI_WORKBENCH_DB_PATH"] = str(Path(tempfile.gettempdir()) / f"ai-workbench-test-{uuid4()}.db")
 os.environ["APP_AUTH_SECRET"] = "test-app-secret"
+os.environ["AI_WORKBENCH_TEST_CREDENTIALS"] = "1"
 
 from backend.main import app
 from backend.schemas import BidWorkflowStatus, ProviderModel
@@ -259,7 +260,7 @@ def test_users_are_isolated_across_projects_conversations_workflows_and_configs(
     assert user_b.get("/api/v1/web-search-config").json()["has_key"] is False
 
     row = workbench_store._execute("SELECT api_key FROM provider_profiles WHERE id = ?", (profile["id"],)).fetchone()
-    assert row["api_key"] == "tenant-a-secret"
+    assert row["api_key"] is None
     assert workbench_store.resolve_api_key(user_a_id, profile["id"]) == "tenant-a-secret"
 
 
@@ -281,11 +282,12 @@ def test_legacy_database_migrates_existing_data_to_its_only_user(tmp_path):
 
     migrated = WorkbenchStore(legacy_path)
     assert migrated.get_project("legacy-user", "legacy-project").title == "历史项目"
+    migrated.migrate_legacy_secrets_on_login("legacy-user", "test-password")
     assert migrated.resolve_api_key("legacy-user", "legacy-profile") == "legacy-secret"
-    assert migrated._execute("SELECT api_key FROM provider_profiles WHERE id = 'legacy-profile'").fetchone()["api_key"] == "legacy-secret"
+    assert migrated._execute("SELECT api_key FROM provider_profiles WHERE id = 'legacy-profile'").fetchone()["api_key"] is None
     assert any(item.project_id == "legacy-project" for item in migrated.search("legacy-user", "历史项目"))
     assert migrated.path.with_suffix(".db.pre-multitenant.bak").exists()
-    assert migrated._connection.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert migrated._connection.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def test_web_search_config_does_not_echo_tavily_key():

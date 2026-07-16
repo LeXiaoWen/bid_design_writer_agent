@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -9,6 +10,9 @@ from argon2.exceptions import VerifyMismatchError, VerificationError
 
 from ..schemas import AuthLoginResponse, AuthUser
 from .workbench_store import utc_now, workbench_store
+
+
+logger = logging.getLogger("bid_design_writer.auth")
 
 
 SESSION_HOURS = 8
@@ -77,6 +81,13 @@ def login_user(username: str, password: str) -> AuthLoginResponse:
     _clear_login_failures(username)
     if _hasher.check_needs_rehash(row["password_hash"]):
         workbench_store.update_user_password_hash(row["id"], _hasher.hash(password))
+
+    try:
+        workbench_store.migrate_legacy_secrets_on_login(row["id"], password)
+    except Exception:
+        # Authentication must remain available even if an old machine has no keychain.
+        # The migration has already created a password-encrypted recovery artifact.
+        logger.warning("credential migration was deferred", extra={"user_id": row["id"]}, exc_info=True)
 
     token = secrets.token_urlsafe(32)
     expires_at = _expires_at()

@@ -66,6 +66,13 @@ export type BidArtifact = {
   kind: "extraction" | "proposal" | "drawing" | "spec" | "file" | string;
 };
 
+export type BidWorkflowExecution = {
+  state: "queued" | "running" | "failed" | "cancelled" | "completed" | string;
+  phase: "extraction" | "generation" | string;
+  progress: number;
+  message: string;
+};
+
 export type BidWorkflow = {
   id: string;
   project_id: string;
@@ -77,6 +84,7 @@ export type BidWorkflow = {
   template_choice?: string | null;
   status: BidWorkflowStatus;
   error?: string | null;
+  execution?: BidWorkflowExecution | null;
   artifacts: BidArtifact[];
   created_at: string;
   updated_at: string;

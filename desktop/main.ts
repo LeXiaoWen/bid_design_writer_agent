@@ -2,7 +2,6 @@ import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from "elect
 import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
-import { createServer } from "node:net";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -44,23 +43,6 @@ ipcMain.handle("workspace:select-directory", async () => {
 ipcMain.handle("auth:get-app-secret", async () => APP_AUTH_SECRET);
 ipcMain.handle("backend:get-url", async () => backendUrl);
 
-function findAvailablePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = createServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      server.close(() => {
-        if (address && typeof address === "object") {
-          resolve(address.port);
-        } else {
-          reject(new Error("无法分配本地后端端口。"));
-        }
-      });
-    });
-  });
-}
-
 async function backendIsReady(): Promise<boolean> {
   try {
     const response = await fetch(`${backendUrl}/health`);
@@ -83,10 +65,6 @@ async function waitForBackendReady(): Promise<void> {
     await delay(BACKEND_READY_INTERVAL_MS);
   }
   throw new Error(`本地后端启动超时：${backendUrl}`);
-}
-
-function backendPort(): string {
-  return new URL(backendUrl).port || "80";
 }
 
 function executableFileExists(filePath: string): boolean {
@@ -127,7 +105,6 @@ function loadEnvFiles(): Record<string, string> {
   const candidates = [
     path.resolve(__dirname, "..", ".env"),
     path.join(process.cwd(), ".env"),
-    path.join(path.dirname(app.getAppPath()), ".env"),
     path.join(process.resourcesPath, ".env"),
     path.join(app.getPath("userData"), ".env"),
   ];
@@ -138,8 +115,8 @@ function loadEnvFiles(): Record<string, string> {
   return env;
 }
 
-function startBackend(): void {
-  if (backendProcess) return;
+function startBackend(): Promise<void> {
+  if (backendProcess) return Promise.resolve();
   const dataDir = path.join(app.getPath("userData"), "data");
   const packagedAgentName = process.platform === "win32" ? "ai-workbench-agent.exe" : "ai-workbench-agent";
   const packagedAgentCandidates = [
@@ -151,7 +128,7 @@ function startBackend(): void {
     ...loadEnvFiles(),
     ...process.env,
     APP_AUTH_SECRET,
-    AGENT_PORT: backendPort(),
+    AGENT_PORT: "0",
     AI_WORKBENCH_DATA_DIR: dataDir,
     FRONTEND_ORIGINS: process.env.FRONTEND_ORIGINS ?? "http://localhost:3000,http://127.0.0.1:3000,app://frontend,null",
   };
@@ -160,24 +137,41 @@ function startBackend(): void {
     backendProcess = spawn(packagedAgentPath, [], { detached: process.platform !== "win32", env });
   } else {
     const pythonCmd = process.platform === "win32" ? "python" : "python3";
-    // packaged 模式下使用 app.getAppPath() 避免 ASAR 虚拟路径传给 spawn cwd
-    const projectRoot = app.isPackaged
-      ? path.dirname(app.getAppPath())
-      : path.resolve(__dirname, "..");
-    backendProcess = spawn(pythonCmd, ["-m", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", backendPort()], {
+    const projectRoot = path.resolve(__dirname, "..");
+    backendProcess = spawn(pythonCmd, ["-m", "backend.server"], {
       cwd: projectRoot,
       detached: process.platform !== "win32",
       env,
     });
   }
-  backendProcess.stdout.on("data", (data) => console.log(`[backend] ${data}`));
-  backendProcess.stderr.on("data", (data) => console.error(`[backend] ${data}`));
-  backendProcess.on("error", (error) => {
-    console.error("[backend] failed to start", error);
-    backendProcess = null;
-  });
-  backendProcess.on("exit", () => {
-    backendProcess = null;
+  return new Promise((resolve, reject) => {
+    let output = "";
+    const timeout = setTimeout(() => reject(new Error("本地后端启动超时。")), BACKEND_READY_TIMEOUT_MS);
+    backendProcess!.stdout.on("data", (data) => {
+      const text = String(data);
+      output += text;
+      console.log(`[backend] ${text}`);
+      const match = output.match(/AI_WORKBENCH_BACKEND_READY=(\d+)/);
+      if (match) {
+        clearTimeout(timeout);
+        backendUrl = `http://127.0.0.1:${match[1]}`;
+        void waitForBackendReady().then(resolve, reject);
+      }
+      output = output.slice(-4096);
+    });
+    backendProcess!.stderr.on("data", (data) => console.error(`[backend] ${data}`));
+    backendProcess!.on("error", (error) => {
+      clearTimeout(timeout);
+      backendProcess = null;
+      reject(error);
+    });
+    backendProcess!.on("exit", (code) => {
+      backendProcess = null;
+      clearTimeout(timeout);
+      if (!output.includes("AI_WORKBENCH_BACKEND_READY=")) {
+        reject(new Error(`本地后端启动失败（退出码 ${code ?? "未知"}）。`));
+      }
+    });
   });
 }
 
@@ -237,12 +231,7 @@ function registerPackagedFrontendProtocol(): void {
 async function prepareBackend(): Promise<void> {
   if (backendStartPromise) return backendStartPromise;
   backendStartPromise = (async () => {
-    const port = await findAvailablePort();
-    backendUrl = `http://127.0.0.1:${port}`;
-    startBackend();
-    void waitForBackendReady().catch((error) => {
-      console.error("[backend] readiness check failed", error);
-    });
+    await startBackend();
   })();
   return backendStartPromise;
 }

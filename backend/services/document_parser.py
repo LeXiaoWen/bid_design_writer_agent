@@ -1,14 +1,32 @@
 import io
+import zipfile
 from pathlib import Path
 
 from docx import Document
 from PyPDF2 import PdfReader
 
 
+def validate_document_signature(filename: str, content: bytes) -> None:
+    suffix = Path(filename).suffix.lower()
+    if suffix == ".pdf" and not content.startswith(b"%PDF-"):
+        raise ValueError("文件扩展名为 PDF，但内容签名不匹配。")
+    if suffix == ".docx":
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                names = set(archive.namelist())
+        except zipfile.BadZipFile as exc:
+            raise ValueError("文件扩展名为 DOCX，但不是有效的 Office 文档。") from exc
+        if "[Content_Types].xml" not in names or "word/document.xml" not in names:
+            raise ValueError("文件扩展名为 DOCX，但文档结构不匹配。")
+    if suffix in {".txt", ".md"} and b"\x00" in content:
+        raise ValueError("文本文件包含二进制内容。")
+
+
 def parse_document(filename: str, content: bytes) -> str:
     suffix = Path(filename).suffix.lower()
     if not content:
         raise ValueError("文件为空，请重新上传。")
+    validate_document_signature(filename, content)
 
     if suffix == ".pdf":
         return _parse_pdf(content)

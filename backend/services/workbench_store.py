@@ -3,15 +3,21 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Any, Iterable, Optional
 from uuid import uuid4
 
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+
 from ..schemas import (
     ArtifactInfo,
     AuthUser,
+    BidExecutionState,
+    BidWorkflowExecution,
     BidWorkflow,
     BidWorkflowStatus,
     ProviderProfile,
@@ -28,8 +34,10 @@ from ..schemas import (
     WorkbenchProjectCreate,
     WorkbenchProjectUpdate,
 )
+from .credentials import CredentialStoreUnavailable, credential_store
 DEFAULT_PROJECT_TITLE = "默认项目"
 MULTI_TENANT_SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def utc_now() -> str:
@@ -144,6 +152,32 @@ class WorkbenchStore:
                     updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS bid_artifact_versions (
+                    id TEXT PRIMARY KEY,
+                    workflow_id TEXT NOT NULL REFERENCES bid_workflows(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(workflow_id, name, version)
+                );
+
+                CREATE TABLE IF NOT EXISTS bid_jobs (
+                    id TEXT PRIMARY KEY,
+                    workflow_id TEXT NOT NULL REFERENCES bid_workflows(id) ON DELETE CASCADE,
+                    owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    progress INTEGER NOT NULL DEFAULT 0,
+                    message TEXT NOT NULL DEFAULT '',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    UNIQUE(workflow_id, kind)
+                );
+
                 CREATE TABLE IF NOT EXISTS users (
                     id TEXT PRIMARY KEY,
                     username TEXT NOT NULL UNIQUE,
@@ -180,6 +214,8 @@ class WorkbenchStore:
                 ON bid_workflows(conversation_id)
                 WHERE status IN ('uploaded', 'extracting', 'extraction_ready', 'generating', 'failed');
 
+                CREATE INDEX IF NOT EXISTS idx_bid_jobs_next ON bid_jobs(state, created_at);
+
                 CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
                     owner_user_id UNINDEXED,
                     kind,
@@ -193,12 +229,13 @@ class WorkbenchStore:
             )
             self._ensure_column("projects", "workspace_path", "TEXT")
             self._ensure_column("projects", "owner_user_id", "TEXT")
+            self._ensure_column("conversations", "context_summary", "TEXT NOT NULL DEFAULT ''")
             provider_has_key_added = self._ensure_column("provider_profiles", "has_key", "INTEGER NOT NULL DEFAULT 0")
             if provider_has_key_added:
                 self._connection.execute("UPDATE provider_profiles SET has_key = 1")
             self._ensure_column("provider_profiles", "api_key", "TEXT")
             self._ensure_column("provider_profiles", "owner_user_id", "TEXT")
-            self._migrate_to_multi_tenant()
+            self._migrate_schema()
 
     def _execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         with self._lock:
@@ -211,21 +248,21 @@ class WorkbenchStore:
             return True
         return False
 
-    def _migrate_to_multi_tenant(self) -> None:
+    def _migrate_schema(self) -> None:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
-        if version >= MULTI_TENANT_SCHEMA_VERSION:
+        if version >= SCHEMA_VERSION:
             return
 
-        self._connection.execute("DROP INDEX IF EXISTS idx_single_user")
-        owner = self._execute("SELECT id FROM users ORDER BY created_at LIMIT 1").fetchone()
-        if owner:
-            owner_user_id = owner["id"]
-            self._execute("UPDATE projects SET owner_user_id = ? WHERE owner_user_id IS NULL", (owner_user_id,))
-            self._execute("UPDATE provider_profiles SET owner_user_id = ? WHERE owner_user_id IS NULL", (owner_user_id,))
-            self._migrate_legacy_credentials(owner_user_id)
-
-        self._rebuild_search_index()
-        self._connection.execute(f"PRAGMA user_version = {MULTI_TENANT_SCHEMA_VERSION}")
+        if version < MULTI_TENANT_SCHEMA_VERSION:
+            self._connection.execute("DROP INDEX IF EXISTS idx_single_user")
+            owner = self._execute("SELECT id FROM users ORDER BY created_at LIMIT 1").fetchone()
+            if owner:
+                owner_user_id = owner["id"]
+                self._execute("UPDATE projects SET owner_user_id = ? WHERE owner_user_id IS NULL", (owner_user_id,))
+                self._execute("UPDATE provider_profiles SET owner_user_id = ? WHERE owner_user_id IS NULL", (owner_user_id,))
+                self._migrate_legacy_credentials(owner_user_id)
+            self._rebuild_search_index()
+        self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _backup_legacy_database_if_needed(self) -> None:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
@@ -257,6 +294,88 @@ class WorkbenchStore:
             value = self.get_setting(key)
             if value is not None:
                 self.set_user_setting(user_id, key, value)
+
+    def migrate_legacy_secrets_on_login(self, user_id: str, password: str) -> None:
+        """Move pre-v0.2 plaintext data to the OS vault and erase it from SQLite.
+
+        A password-encrypted recovery blob is written before any destructive operation so
+        a user can import it later if their desktop credential service was unavailable.
+        """
+        profiles = self._execute(
+            "SELECT id, credential_key, api_key FROM provider_profiles WHERE owner_user_id = ? AND api_key IS NOT NULL AND api_key != ''",
+            (user_id,),
+        ).fetchall()
+        tavily_key = self.get_user_setting(user_id, "web_search.api_key") or ""
+        secrets_to_migrate = {
+            **{f"provider:{row['id']}": row["api_key"] for row in profiles},
+            **({"tavily": tavily_key} if tavily_key else {}),
+        }
+        if not secrets_to_migrate:
+            return
+
+        self._write_recovery_backup(user_id, password, secrets_to_migrate)
+        try:
+            for row in profiles:
+                key = f"provider:{user_id}:{row['id']}"
+                credential_store.set(key, row["api_key"])
+                self._execute("UPDATE provider_profiles SET credential_key = ?, has_key = 1 WHERE id = ?", (key, row["id"]))
+            if tavily_key:
+                credential_store.set(self._tavily_credential_key(user_id), tavily_key)
+        finally:
+            # The runtime must never continue consuming plaintext data after v0.2.
+            with self._lock, self._connection:
+                self._execute("UPDATE provider_profiles SET api_key = NULL WHERE owner_user_id = ?", (user_id,))
+                self.set_user_setting(user_id, "web_search.api_key", "")
+                self.set_user_setting(user_id, "web_search.has_key", "1" if tavily_key else "0")
+
+    def _write_recovery_backup(self, user_id: str, password: str, values: dict[str, str]) -> Path:
+        salt = os.urandom(16)
+        nonce = os.urandom(12)
+        kdf = Scrypt(salt=salt, length=32, n=2**14, r=8, p=1)
+        key = kdf.derive(password.encode("utf-8"))
+        encrypted = AESGCM(key).encrypt(nonce, json.dumps(values, ensure_ascii=False).encode("utf-8"), user_id.encode("utf-8"))
+        recovery_dir = data_dir() / "credential-recovery"
+        recovery_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        target = recovery_dir / f"{user_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}.json.enc"
+        payload = {"version": 1, "user_id": user_id, "salt": urlsafe_b64encode(salt).decode(), "nonce": urlsafe_b64encode(nonce).decode(), "ciphertext": urlsafe_b64encode(encrypted).decode()}
+        target.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        target.chmod(0o600)
+        return target
+
+    def restore_latest_legacy_secrets(self, user_id: str, password: str) -> int:
+        recovery_dir = data_dir() / "credential-recovery"
+        candidates = sorted(recovery_dir.glob(f"{user_id}-*.json.enc"), reverse=True) if recovery_dir.exists() else []
+        if not candidates:
+            raise ValueError("未找到可恢复的旧密钥备份。")
+        payload = json.loads(candidates[0].read_text(encoding="utf-8"))
+        if payload.get("user_id") != user_id:
+            raise ValueError("旧密钥备份与当前账号不匹配。")
+        salt = urlsafe_b64decode(payload["salt"])
+        nonce = urlsafe_b64decode(payload["nonce"])
+        ciphertext = urlsafe_b64decode(payload["ciphertext"])
+        try:
+            key = Scrypt(salt=salt, length=32, n=2**14, r=8, p=1).derive(password.encode("utf-8"))
+            values = json.loads(AESGCM(key).decrypt(nonce, ciphertext, user_id.encode("utf-8")))
+        except Exception as exc:
+            raise ValueError("恢复密码错误或备份文件已损坏。") from exc
+        restored = 0
+        for name, secret in values.items():
+            if name == "tavily":
+                credential_store.set(self._tavily_credential_key(user_id), secret)
+                self.set_user_setting(user_id, "web_search.has_key", "1")
+                restored += 1
+                continue
+            if not name.startswith("provider:"):
+                continue
+            profile_id = name.removeprefix("provider:")
+            row = self._execute("SELECT id FROM provider_profiles WHERE id = ? AND owner_user_id = ?", (profile_id, user_id)).fetchone()
+            if not row:
+                continue
+            credential_key = f"provider:{user_id}:{profile_id}"
+            credential_store.set(credential_key, secret)
+            self._execute("UPDATE provider_profiles SET credential_key = ?, has_key = 1, api_key = NULL WHERE id = ?", (credential_key, profile_id))
+            restored += 1
+        return restored
 
     def _rebuild_search_index(self) -> None:
         self._connection.execute("DROP TABLE IF EXISTS search_index")
@@ -508,6 +627,17 @@ class WorkbenchStore:
             )
         return self.get_conversation(user_id, conversation_id)
 
+    def get_context_summary(self, user_id: str, conversation_id: str) -> str:
+        self.get_conversation(user_id, conversation_id)
+        row = self._execute("SELECT context_summary FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
+        return str(row["context_summary"] or "") if row else ""
+
+    def set_context_summary(self, user_id: str, conversation_id: str, summary: str) -> None:
+        conversation = self.get_conversation(user_id, conversation_id)
+        with self._lock, self._connection:
+            self._execute("UPDATE conversations SET context_summary = ?, updated_at = ? WHERE id = ?", (summary, utc_now(), conversation_id))
+            self._touch_project(conversation.project_id)
+
     def delete_conversation(self, user_id: str, conversation_id: str) -> None:
         conversation = self.get_conversation(user_id, conversation_id)
         with self._lock, self._connection:
@@ -620,6 +750,90 @@ class WorkbenchStore:
             self._touch_project(workflow.project_id, now)
         return self.get_bid_workflow(user_id, workflow_id)
 
+    def enqueue_bid_job(self, user_id: str, workflow_id: str, kind: str) -> BidWorkflow:
+        workflow = self.get_bid_workflow(user_id, workflow_id)
+        now = utc_now()
+        with self._lock, self._connection:
+            self._execute(
+                """
+                INSERT INTO bid_jobs (id, workflow_id, owner_user_id, kind, state, progress, message, attempts, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 0, '等待执行。', 0, ?, ?)
+                ON CONFLICT(workflow_id, kind) DO UPDATE SET state = excluded.state, progress = 0, message = excluded.message, updated_at = excluded.updated_at
+                """,
+                (str(uuid4()), workflow_id, user_id, kind, BidExecutionState.QUEUED.value, now, now),
+            )
+        return self.get_bid_workflow(user_id, workflow_id)
+
+    def recover_bid_jobs(self) -> None:
+        """Restart work interrupted by an application exit once; otherwise leave it failed."""
+        now = utc_now()
+        with self._lock, self._connection:
+            rows = self._execute("SELECT workflow_id, owner_user_id, attempts FROM bid_jobs WHERE state = ?", (BidExecutionState.RUNNING.value,)).fetchall()
+            for row in rows:
+                if row["attempts"] < 1:
+                    self._execute(
+                        "UPDATE bid_jobs SET state = ?, attempts = attempts + 1, message = ?, updated_at = ? WHERE workflow_id = ?",
+                        (BidExecutionState.QUEUED.value, "应用重启后正在恢复。", now, row["workflow_id"]),
+                    )
+                else:
+                    self._execute(
+                        "UPDATE bid_jobs SET state = ?, message = ?, updated_at = ?, completed_at = ? WHERE workflow_id = ?",
+                        (BidExecutionState.FAILED.value, "应用中断后恢复失败，请手动重试。", now, now, row["workflow_id"]),
+                    )
+                    self._execute(
+                        "UPDATE bid_workflows SET status = ?, error = ?, updated_at = ? WHERE id = ?",
+                        (BidWorkflowStatus.FAILED.value, "应用中断后恢复失败，请手动重试。", now, row["workflow_id"]),
+                    )
+
+    def claim_next_bid_job(self) -> dict[str, str] | None:
+        now = utc_now()
+        with self._lock, self._connection:
+            row = self._execute(
+                "SELECT * FROM bid_jobs WHERE state = ? ORDER BY created_at LIMIT 1",
+                (BidExecutionState.QUEUED.value,),
+            ).fetchone()
+            if not row:
+                return None
+            cursor = self._execute(
+                "UPDATE bid_jobs SET state = ?, progress = 5, message = ?, started_at = ?, updated_at = ? WHERE id = ? AND state = ?",
+                (BidExecutionState.RUNNING.value, "正在准备任务。", now, now, row["id"], BidExecutionState.QUEUED.value),
+            )
+            if cursor.rowcount == 0:
+                return None
+            return {"id": row["id"], "workflow_id": row["workflow_id"], "owner_user_id": row["owner_user_id"], "kind": row["kind"]}
+
+    def update_bid_job(self, job_id: str, state: BidExecutionState | None = None, progress: int | None = None, message: str | None = None) -> None:
+        now = utc_now()
+        assignments: list[str] = ["updated_at = ?"]
+        values: list[Any] = [now]
+        if state is not None:
+            assignments.append("state = ?")
+            values.append(state.value)
+            if state in {BidExecutionState.COMPLETED, BidExecutionState.FAILED, BidExecutionState.CANCELLED}:
+                assignments.append("completed_at = ?")
+                values.append(now)
+        if progress is not None:
+            assignments.append("progress = ?")
+            values.append(max(0, min(progress, 100)))
+        if message is not None:
+            assignments.append("message = ?")
+            values.append(message)
+        values.append(job_id)
+        with self._lock, self._connection:
+            self._execute(f"UPDATE bid_jobs SET {', '.join(assignments)} WHERE id = ?", values)
+
+    def cancel_bid_jobs(self, workflow_id: str) -> None:
+        self._execute(
+            "UPDATE bid_jobs SET state = ?, message = ?, completed_at = ?, updated_at = ? WHERE workflow_id = ? AND state IN (?, ?)",
+            (BidExecutionState.CANCELLED.value, "任务已取消。", utc_now(), utc_now(), workflow_id, BidExecutionState.QUEUED.value, BidExecutionState.RUNNING.value),
+        )
+
+    def get_bid_execution(self, workflow_id: str) -> BidWorkflowExecution | None:
+        row = self._execute("SELECT state, kind, progress, message FROM bid_jobs WHERE workflow_id = ? ORDER BY updated_at DESC LIMIT 1", (workflow_id,)).fetchone()
+        if not row:
+            return None
+        return BidWorkflowExecution(state=row["state"], phase=row["kind"], progress=row["progress"], message=row["message"])
+
     def save_bid_extraction(self, user_id: str, workflow_id: str, extracted_markdown: str) -> BidWorkflow:
         workflow = self.get_bid_workflow(user_id, workflow_id)
         now = utc_now()
@@ -664,8 +878,19 @@ class WorkbenchStore:
         workflow = self.get_bid_workflow(user_id, workflow_id)
         now = utc_now()
         with self._lock, self._connection:
+            next_versions = {
+                row["name"]: int(row["version"]) + 1
+                for row in self._execute(
+                    "SELECT name, MAX(version) AS version FROM bid_artifact_versions WHERE workflow_id = ? GROUP BY name",
+                    (workflow_id,),
+                ).fetchall()
+            }
             self._execute("DELETE FROM bid_artifacts WHERE workflow_id = ?", (workflow_id,))
             for name, content in files.items():
+                self._execute(
+                    "INSERT INTO bid_artifact_versions (id, workflow_id, name, version, content, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (str(uuid4()), workflow_id, name, next_versions.get(name, 1), content, now),
+                )
                 self._execute(
                     """
                     INSERT INTO bid_artifacts (id, workflow_id, name, kind, size, path, content, created_at, updated_at)
@@ -689,6 +914,40 @@ class WorkbenchStore:
             self._touch_conversation(workflow.conversation_id, now)
             self._touch_project(workflow.project_id, now)
         return self.list_bid_artifacts(user_id, workflow_id)
+
+    def list_bid_artifact_versions(self, user_id: str, workflow_id: str, name: str | None = None) -> list[dict[str, Any]]:
+        self.get_bid_workflow(user_id, workflow_id)
+        query = "SELECT name, version, length(content) AS size, created_at FROM bid_artifact_versions WHERE workflow_id = ?"
+        params: list[Any] = [workflow_id]
+        if name is not None:
+            query += " AND name = ?"
+            params.append(name)
+        query += " ORDER BY name, version DESC"
+        return [dict(row) for row in self._execute(query, params).fetchall()]
+
+    def restore_bid_artifact_version(self, user_id: str, workflow_id: str, name: str, version: int) -> None:
+        workflow = self.get_bid_workflow(user_id, workflow_id)
+        row = self._execute(
+            "SELECT content FROM bid_artifact_versions WHERE workflow_id = ? AND name = ? AND version = ?",
+            (workflow_id, name, version),
+        ).fetchone()
+        if not row:
+            raise KeyError(version)
+        now = utc_now()
+        with self._lock, self._connection:
+            next_version = self._execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 AS version FROM bid_artifact_versions WHERE workflow_id = ? AND name = ?",
+                (workflow_id, name),
+            ).fetchone()["version"]
+            self._execute(
+                "INSERT INTO bid_artifact_versions (id, workflow_id, name, version, content, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (str(uuid4()), workflow_id, name, next_version, row["content"], now),
+            )
+            self._execute(
+                "UPDATE bid_artifacts SET content = ?, size = ?, updated_at = ? WHERE workflow_id = ? AND name = ?",
+                (row["content"], len(row["content"]), now, workflow_id, name),
+            )
+            self._touch_conversation(workflow.conversation_id, now)
 
     def list_bid_artifacts(self, user_id: str, workflow_id: str) -> list[ArtifactInfo]:
         self.get_bid_workflow(user_id, workflow_id)
@@ -814,8 +1073,10 @@ class WorkbenchStore:
     def create_provider_profile(self, user_id: str, request: ProviderProfileCreate) -> ProviderProfile:
         profile_id = str(uuid4())
         now = utc_now()
-        credential_key = f"db:{profile_id}"
+        credential_key = f"provider:{user_id}:{profile_id}"
         api_key = request.api_key.strip() if request.api_key else None
+        if api_key:
+            credential_store.set(credential_key, api_key)
         with self._lock, self._connection:
             self._execute(
                 """
@@ -831,7 +1092,7 @@ class WorkbenchStore:
                     request.model,
                     credential_key,
                     1 if api_key else 0,
-                    api_key,
+                    None,
                     now,
                     now,
                 ),
@@ -846,19 +1107,23 @@ class WorkbenchStore:
 
     def update_provider_profile(self, user_id: str, profile_id: str, request: ProviderProfileUpdate) -> ProviderProfile:
         profile = self.get_provider_profile(user_id, profile_id)
-        row = self._execute("SELECT api_key FROM provider_profiles WHERE id = ? AND owner_user_id = ?", (profile_id, user_id)).fetchone()
+        row = self._execute("SELECT credential_key FROM provider_profiles WHERE id = ? AND owner_user_id = ?", (profile_id, user_id)).fetchone()
         now = utc_now()
         if request.api_key is not None:
             api_key = request.api_key.strip() if request.api_key else None
             has_key = 1 if api_key else 0
+            credential_key = row["credential_key"] if row else f"provider:{user_id}:{profile_id}"
+            if api_key:
+                credential_store.set(credential_key, api_key)
+            else:
+                credential_store.delete(credential_key)
         else:
-            api_key = row["api_key"] if row else None
             has_key = int(profile.has_key)
         with self._lock, self._connection:
             self._execute(
                 """
                 UPDATE provider_profiles
-                SET provider = ?, display_name = ?, base_url = ?, model = ?, has_key = ?, api_key = ?, updated_at = ?
+                SET provider = ?, display_name = ?, base_url = ?, model = ?, has_key = ?, api_key = NULL, updated_at = ?
                 WHERE id = ? AND owner_user_id = ?
                 """,
                 (
@@ -867,7 +1132,6 @@ class WorkbenchStore:
                     request.base_url if request.base_url is not None else profile.base_url,
                     request.model if request.model is not None else profile.model,
                     has_key,
-                    api_key,
                     now,
                     profile_id,
                     user_id,
@@ -928,7 +1192,12 @@ class WorkbenchStore:
     def update_web_search_config(self, user_id: str, request: WebSearchConfigUpdate) -> WebSearchConfig:
         if request.api_key is not None:
             key = request.api_key.strip() or None
-            self.set_user_setting(user_id, "web_search.api_key", key or "")
+            credential_key = self._tavily_credential_key(user_id)
+            if key:
+                credential_store.set(credential_key, key)
+            else:
+                credential_store.delete(credential_key)
+            self.set_user_setting(user_id, "web_search.api_key", "")
             self.set_user_setting(user_id, "web_search.has_key", "1" if key else "0")
         if request.max_results is not None:
             self.set_user_setting(user_id, "web_search.max_results", str(request.max_results))
@@ -937,7 +1206,10 @@ class WorkbenchStore:
         return self.get_web_search_config(user_id)
 
     def delete_provider_profile(self, user_id: str, profile_id: str) -> None:
+        row = self._execute("SELECT credential_key FROM provider_profiles WHERE id = ? AND owner_user_id = ?", (profile_id, user_id)).fetchone()
         self.get_provider_profile(user_id, profile_id)
+        if row:
+            credential_store.delete(row["credential_key"])
         with self._lock, self._connection:
             self._execute("DELETE FROM provider_profiles WHERE id = ? AND owner_user_id = ?", (profile_id, user_id))
 
@@ -946,10 +1218,12 @@ class WorkbenchStore:
             return inline_api_key
         if not profile_id:
             return None
-        row = self._execute("SELECT api_key FROM provider_profiles WHERE id = ? AND owner_user_id = ?", (profile_id, user_id)).fetchone()
+        row = self._execute("SELECT credential_key, has_key FROM provider_profiles WHERE id = ? AND owner_user_id = ?", (profile_id, user_id)).fetchone()
         if not row:
             raise KeyError(profile_id)
-        return row["api_key"] or None
+        if not row["has_key"]:
+            return None
+        return credential_store.get(row["credential_key"])
 
     def resolve_tavily_api_key(self, user_id: str) -> str | None:
         """返回 Tavily API key。
@@ -960,14 +1234,17 @@ class WorkbenchStore:
         return key
 
     def _resolve_tavily_api_key_with_source(self, user_id: str) -> tuple[str | None, str]:
-        """返回 (api_key, source)，source 为 'db' / 'env' / 'none'。"""
-        user_key = self.get_user_setting(user_id, "web_search.api_key")
+        """返回 (api_key, source)，source 为 'system' / 'env' / 'none'。"""
+        user_key = credential_store.get(self._tavily_credential_key(user_id))
         if user_key:
-            return user_key, "db"
+            return user_key, "system"
         env_key = os.getenv("TAVILY_API_KEY", "").strip()
         if env_key:
             return env_key, "env"
         return None, "none"
+
+    def _tavily_credential_key(self, user_id: str) -> str:
+        return f"tavily:{user_id}"
 
     def search(self, user_id: str, query: str) -> list[SearchResult]:
         trimmed = query.strip()
@@ -1104,6 +1381,7 @@ class WorkbenchStore:
             template_choice=row["template_choice"],
             status=row["status"],
             error=row["error"],
+            execution=self.get_bid_execution(row["id"]),
             artifacts=self._list_bid_artifacts_unchecked(user_id, row["id"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],

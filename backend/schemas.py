@@ -14,6 +14,21 @@ class BidWorkflowStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class BidExecutionState(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    COMPLETED = "completed"
+
+
+class BidWorkflowExecution(BaseModel):
+    state: BidExecutionState
+    phase: str
+    progress: int = Field(ge=0, le=100)
+    message: str = ""
+
+
 class ApiConfig(BaseModel):
     provider: str = "OpenAI"
     base_url: str = "https://api.openai.com/v1"
@@ -25,6 +40,13 @@ class ArtifactInfo(BaseModel):
     name: str
     size: int
     kind: str
+
+
+class ArtifactVersion(BaseModel):
+    name: str
+    version: int
+    size: int
+    created_at: str
 
 
 class BidWorkflow(BaseModel):
@@ -39,6 +61,7 @@ class BidWorkflow(BaseModel):
     template_choice: Optional[str] = None
     status: BidWorkflowStatus
     error: Optional[str] = None
+    execution: Optional[BidWorkflowExecution] = None
     artifacts: List[ArtifactInfo] = Field(default_factory=list)
     created_at: str
     updated_at: str
@@ -55,6 +78,7 @@ class BidWorkflowPublic(BaseModel):
     template_choice: Optional[str] = None
     status: BidWorkflowStatus
     error: Optional[str] = None
+    execution: Optional[BidWorkflowExecution] = None
     artifacts: List[ArtifactInfo] = Field(default_factory=list)
     created_at: str
     updated_at: str
@@ -118,6 +142,10 @@ class AuthUser(BaseModel):
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(min_length=1)
     new_password: str = Field(min_length=6)
+
+
+class RestoreCredentialsRequest(BaseModel):
+    password: str = Field(min_length=1)
 
 
 class WorkbenchProject(BaseModel):
