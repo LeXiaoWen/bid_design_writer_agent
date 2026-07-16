@@ -138,6 +138,12 @@ textarea:focus {
   gap: 13px;
 }
 
+.auth-field-error {
+  color: #c54a3f;
+  font-size: 12px;
+  font-weight: 650;
+}
+
 .auth-form label {
   display: grid;
   gap: 7px;

@@ -24,7 +24,6 @@ import {
 import { ChangeEvent, CSSProperties, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import * as Tabs from "@radix-ui/react-tabs";
 import { useQuery } from "@tanstack/react-query";
 
 import {
@@ -63,6 +62,7 @@ import {
 } from "@/lib/api";
 import { MarkdownPane } from "@/components/MarkdownPane";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { AuthPanel, type AuthMode as AuthPanelMode } from "@/components/AuthPanel";
 import { useChatStream } from "@/hooks/useChatStream";
 import type {
   AuthUser,
@@ -87,13 +87,7 @@ const providerPresets = [
   { provider: "自定义", display_name: "自定义", base_url: "", model: "" },
 ];
 
-type AuthMode = "register" | "login" | "ready";
-
-const emptyAuthForm = {
-  username: "",
-  password: "",
-  confirmPassword: "",
-};
+type AuthMode = AuthPanelMode | "ready";
 const PROJECT_PREVIEW_CONVERSATION_LIMIT = 6;
 
 function localMessage(role: "user" | "assistant", content: string, status: string): WorkbenchMessage {
@@ -218,7 +212,6 @@ export default function Home() {
   const [authMode, setAuthMode] = useState<AuthMode>("login");
   const [authBackendReady, setAuthBackendReady] = useState(false);
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
-  const [authForm, setAuthForm] = useState(emptyAuthForm);
   const [passwordForm, setPasswordForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "" });
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [providerModels, setProviderModels] = useState<ProviderModel[]>([]);
@@ -339,7 +332,6 @@ export default function Home() {
 
   function switchAuthMode(nextMode: "login" | "register") {
     setAuthMode(nextMode);
-    setAuthForm(emptyAuthForm);
     setError(null);
   }
 
@@ -899,31 +891,21 @@ export default function Home() {
     const user = await getMe();
     setAuthUser(user);
     setAuthMode("ready");
-    setAuthForm(emptyAuthForm);
     setError(null);
     await bootstrap();
   }
 
-  async function submitAuth(event: FormEvent) {
-    event.preventDefault();
+  async function submitAuth(mode: AuthPanelMode, values: { username: string; password: string; confirmPassword: string }) {
     if (!authBackendReady) {
       setError("正在连接本地后端，请稍候。");
       return;
     }
-    const username = authForm.username.trim();
-    if (!username || !authForm.password) {
-      setError("请输入用户名和密码。");
-      return;
-    }
-    if (authMode === "register" && authForm.password !== authForm.confirmPassword) {
-      setError("两次输入的密码不一致。");
-      return;
-    }
+    const username = values.username.trim();
     try {
       const response =
-        authMode === "register"
-          ? await registerAuth({ username, password: authForm.password })
-          : await loginAuth({ username, password: authForm.password });
+        mode === "register"
+          ? await registerAuth({ username, password: values.password })
+          : await loginAuth({ username, password: values.password });
       await completeAuthSession(response.token);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -1239,56 +1221,7 @@ export default function Home() {
     ) : null;
 
   if (authMode !== "ready") {
-    return (
-      <main className="auth-screen">
-        <section className="auth-panel">
-          <div className="auth-heading">
-            <span>建筑设计标书方案助手</span>
-            <h1>{authMode === "register" ? "注册" : "登录"}</h1>
-          </div>
-          <Tabs.Root value={authMode} onValueChange={(value) => switchAuthMode(value as "login" | "register")}>
-            <Tabs.List className="auth-tabs" aria-label="账号入口">
-              <Tabs.Trigger value="login">登录</Tabs.Trigger>
-              <Tabs.Trigger value="register">注册</Tabs.Trigger>
-            </Tabs.List>
-          </Tabs.Root>
-          <form className="auth-form" onSubmit={submitAuth}>
-            <label>
-              用户名
-              <input value={authForm.username} onChange={(event) => setAuthForm({ ...authForm, username: event.target.value })} autoComplete="username" />
-            </label>
-            <label>
-              密码
-              <input
-                value={authForm.password}
-                type="password"
-                onChange={(event) => setAuthForm({ ...authForm, password: event.target.value })}
-                autoComplete={authMode === "register" ? "new-password" : "current-password"}
-              />
-            </label>
-            {authMode === "register" && (
-              <label>
-                确认密码
-                <input
-                  value={authForm.confirmPassword}
-                  type="password"
-                  onChange={(event) => setAuthForm({ ...authForm, confirmPassword: event.target.value })}
-                  autoComplete="new-password"
-                />
-              </label>
-            )}
-            <button type="submit">{authMode === "register" ? "注册并进入" : "登录"}</button>
-          </form>
-          {!authBackendReady && (
-            <div className="auth-status">
-              <Loader2 size={16} className="spin-icon" />
-              <span>正在连接本地后端，可先输入账号密码</span>
-            </div>
-          )}
-          {error && <div className="auth-error">{error}</div>}
-        </section>
-      </main>
-    );
+    return <AuthPanel mode={authMode} backendReady={authBackendReady} error={error} onModeChange={switchAuthMode} onSubmit={submitAuth} />;
   }
 
   return (
