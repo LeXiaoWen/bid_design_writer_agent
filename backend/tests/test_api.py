@@ -287,7 +287,7 @@ def test_legacy_database_migrates_existing_data_to_its_only_user(tmp_path):
     assert migrated._execute("SELECT api_key FROM provider_profiles WHERE id = 'legacy-profile'").fetchone()["api_key"] is None
     assert any(item.project_id == "legacy-project" for item in migrated.search("legacy-user", "历史项目"))
     assert migrated.path.with_suffix(".db.pre-multitenant.bak").exists()
-    assert migrated._connection.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert migrated._connection.execute("PRAGMA user_version").fetchone()[0] == 5
 
 
 def test_web_search_config_does_not_echo_tavily_key():
@@ -386,14 +386,14 @@ def test_bid_workflow_store_persists_state_and_artifacts():
     assert workflow.file_name == "招标文件.txt"
     assert workbench_store.get_active_bid_workflow(TEST_USER_ID, conversation_id).id == workflow.id
 
-    with pytest.raises(ValueError, match="已有未完成"):
-        workbench_store.create_bid_workflow(
-            TEST_USER_ID,
-            conversation_id=conversation_id,
-            provider_profile_id=profile_id,
-            file_name="另一个招标文件.txt",
-            file_text="项目名称：另一个项目",
-        )
+    second_workflow = workbench_store.create_bid_workflow(
+        TEST_USER_ID,
+        conversation_id=conversation_id,
+        provider_profile_id=profile_id,
+        file_name="另一个招标文件.txt",
+        file_text="项目名称：另一个项目",
+    )
+    assert {item.id for item in workbench_store.list_bid_workflows(TEST_USER_ID, conversation_id)} == {workflow.id, second_workflow.id}
 
     extracting = workbench_store.update_bid_workflow_status(TEST_USER_ID, workflow.id, BidWorkflowStatus.EXTRACTING)
     assert extracting.status == BidWorkflowStatus.EXTRACTING
@@ -419,7 +419,7 @@ def test_bid_workflow_store_persists_state_and_artifacts():
     completed = workbench_store.get_bid_workflow(TEST_USER_ID, workflow.id)
 
     assert completed.status == BidWorkflowStatus.COMPLETED
-    assert workbench_store.get_active_bid_workflow(TEST_USER_ID, conversation_id) is None
+    assert workbench_store.get_active_bid_workflow(TEST_USER_ID, conversation_id).id == second_workflow.id
     assert [artifact.kind for artifact in artifacts] == ["extraction", "proposal"]
     assert workbench_store.get_bid_artifact_content(TEST_USER_ID, workflow.id, "测试标书项目_设计方案.md") == "# 设计方案"
 
@@ -473,12 +473,13 @@ def test_bid_workflow_v1_full_chain(monkeypatch):
     assert created.json()["status"] == "uploaded"
     assert created.json()["char_count"] > 0
 
-    duplicate = client.post(
+    second_workflow = client.post(
         "/api/v1/bid-workflows",
         data={"conversation_id": conversation_id, "provider_profile_id": profile_id},
         files={"file": ("另一个.txt", "项目名称：另一个".encode("utf-8"), "text/plain")},
     )
-    assert duplicate.status_code == 400
+    assert second_workflow.status_code == 200
+    assert second_workflow.json()["status"] == "uploaded"
 
     extract = client.post(f"/api/v1/bid-workflows/{workflow_id}/extract")
     assert extract.status_code == 200
@@ -515,6 +516,7 @@ def test_bid_workflow_v1_full_chain(monkeypatch):
     listed = client.get("/api/v1/bid-workflows", params={"conversation_id": conversation_id})
     assert listed.status_code == 200
     assert listed.json()[0]["id"] == workflow_id
+    assert {item["id"] for item in listed.json()} == {workflow_id, second_workflow.json()["id"]}
     assert "file_text" not in listed.json()[0]
     assert len(listed.json()[0]["artifacts"]) == 4
 

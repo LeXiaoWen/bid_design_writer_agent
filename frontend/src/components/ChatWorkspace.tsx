@@ -18,7 +18,7 @@ type ChatWorkspaceProps = {
   onSend: () => Promise<void>;
   isStreaming: boolean;
   onStopStreaming: () => void;
-  isBidBusy: boolean;
+  isUploadingTender: boolean;
   onUploadTenderFile: (event: ChangeEvent<HTMLInputElement>) => void;
   uploadProgress: number | null;
   uploadFileName: string;
@@ -66,7 +66,7 @@ export function ChatWorkspace({
   onSend,
   isStreaming,
   onStopStreaming,
-  isBidBusy,
+  isUploadingTender,
   onUploadTenderFile,
   uploadProgress,
   uploadFileName,
@@ -98,10 +98,10 @@ export function ChatWorkspace({
       <div className="toolbar-left">
         <input ref={fileInputRef} type="file" accept=".pdf,.docx,.txt,.md" className="hidden-file-input" onChange={onUploadTenderFile} />
         <DropdownMenu.Root open={attachmentMenuOpen} onOpenChange={onAttachmentMenuOpenChange}>
-          <DropdownMenu.Trigger asChild><button type="button" className="attachment-add-button" disabled={isBidBusy} aria-label="添加"><Plus size={18} /></button></DropdownMenu.Trigger>
+          <DropdownMenu.Trigger asChild><button type="button" className="attachment-add-button" disabled={isUploadingTender} aria-label="添加"><Plus size={18} /></button></DropdownMenu.Trigger>
           <DropdownMenu.Portal>
             <DropdownMenu.Content className="attachment-menu" side="top" align="start" sideOffset={8}>
-              <DropdownMenu.Item className="attachment-menu-item" disabled={isBidBusy} onSelect={() => fileInputRef.current?.click()}>
+              <DropdownMenu.Item className="attachment-menu-item" disabled={isUploadingTender} onSelect={() => fileInputRef.current?.click()}>
                 <FileText size={16} />
                 <span>上传招标文件</span>
               </DropdownMenu.Item>
@@ -110,7 +110,7 @@ export function ChatWorkspace({
         </DropdownMenu.Root>
         {uploadProgress !== null && (
           <div className="upload-progress" title={uploadFileName}>
-            <span>{uploadProgress}%</span>
+            <span>{uploadProgress === 100 ? "正在解析文件…" : `上传 ${uploadProgress}%`}</span>
             <div><i style={{ width: `${uploadProgress}%` }} /></div>
           </div>
         )}

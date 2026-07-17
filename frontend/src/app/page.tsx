@@ -23,6 +23,7 @@ import {
   getBidWorkflow,
   listBidWorkflows,
   searchWorkbench,
+  streamBidWorkflow,
 } from "@/lib/api";
 import { ChatWorkspace } from "@/components/ChatWorkspace";
 import { ConfigDialog, type ProviderProfileDraft, type ProviderProfileValues, type WebSearchValues } from "@/components/ConfigDialog";
@@ -31,13 +32,14 @@ import { AuthPanel, type AuthMode as AuthPanelMode } from "@/components/AuthPane
 import { BidWorkflowPanel } from "@/components/BidWorkflowPanel";
 import { WorkbenchSidebar } from "@/components/WorkbenchSidebar";
 import { useAuth } from "@/hooks/useAuth";
-import { useBidWorkflow } from "@/hooks/useBidWorkflow";
+import { useBidWorkflow, useBidWorkflows } from "@/hooks/useBidWorkflow";
 import { useChatStream } from "@/hooks/useChatStream";
 import { useConfiguration } from "@/hooks/useConfiguration";
 import { useProviderModels } from "@/hooks/useProviderModels";
 import { useWorkbenchData } from "@/hooks/useWorkbenchData";
 import type {
   BidWorkflow,
+  BidWorkflowStreamEvent,
   ChatStreamEvent,
   SearchResult,
   WebSearchConfig,
@@ -151,9 +153,10 @@ export default function Home() {
     setWorkflow: setActiveBidWorkflow,
     isBusy: isBidBusy,
     setIsBusy: setIsBidBusy,
-    polledWorkflow,
     error: workflowError,
   } = useBidWorkflow();
+  const [bidWorkflows, setBidWorkflows] = useState<BidWorkflow[]>([]);
+  const { workflows: polledBidWorkflows, error: bidWorkflowsError } = useBidWorkflows(currentConversationId, bidWorkflows);
   const [bidConfirmation, setBidConfirmation] = useState("确认");
   const [bidExtraContext, setBidExtraContext] = useState("");
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
@@ -276,15 +279,14 @@ export default function Home() {
   }, [searchQuery]);
 
   useEffect(() => {
-    const workflow = polledWorkflow;
-    if (!workflow) return;
-    if (workflow.conversation_id === currentConversationId) {
-      void refreshMessages(workflow.conversation_id).catch((caught) => setError(caught instanceof Error ? caught.message : String(caught)));
+    if (!polledBidWorkflows) return;
+    setBidWorkflows(polledBidWorkflows);
+    const activeWorkflow = activeBidWorkflow && polledBidWorkflows.find((workflow) => workflow.id === activeBidWorkflow.id);
+    if (activeWorkflow) setActiveBidWorkflow(activeWorkflow);
+    if (polledBidWorkflows.some((workflow) => ["extracting", "generating"].includes(workflow.status)) && currentConversationId) {
+      void refreshMessages(currentConversationId).catch((caught) => setError(caught instanceof Error ? caught.message : String(caught)));
     }
-    if (!["extracting", "generating"].includes(workflow.status)) {
-      void refreshConversations(currentProjectId).catch((caught) => setError(caught instanceof Error ? caught.message : String(caught)));
-    }
-  }, [polledWorkflow, currentConversationId, currentProjectId, refreshMessages, refreshConversations]);
+  }, [polledBidWorkflows, activeBidWorkflow?.id, currentConversationId, refreshMessages, setActiveBidWorkflow]);
 
   useEffect(() => {
     if (!workflowError) return;
@@ -292,11 +294,34 @@ export default function Home() {
     setIsBidBusy(false);
   }, [workflowError, setIsBidBusy]);
 
+  useEffect(() => {
+    if (!bidWorkflowsError) return;
+    setError(bidWorkflowsError instanceof Error ? bidWorkflowsError.message : String(bidWorkflowsError));
+  }, [bidWorkflowsError]);
+
+  useEffect(() => {
+    if (!activeBidWorkflow || !["extracting", "generating"].includes(activeBidWorkflow.status)) return;
+    const controller = new AbortController();
+    void streamBidWorkflow(activeBidWorkflow.id, (event: BidWorkflowStreamEvent) => {
+      if (event.event === "message_start" || event.event === "message_done") {
+        updateMessages(event.data.conversation_id, (current) => applyChatStreamEvent(current, event));
+        return;
+      }
+      updateMessages(event.data.conversation_id, (current) => current.map((message) => (
+        message.id === event.data.message_id ? { ...message, content: event.data.content, status: "streaming", updated_at: new Date().toISOString() } : message
+      )));
+    }, controller.signal).catch((caught) => {
+      if (!controller.signal.aborted) setError(caught instanceof Error ? caught.message : String(caught));
+    });
+    return () => controller.abort();
+  }, [activeBidWorkflow?.id, activeBidWorkflow?.status, updateMessages]);
+
   async function switchProject(project: WorkbenchProject) {
     setCurrentProjectId(project.id);
     setProjectConversationsOpen(true);
     setCurrentConversationId(null);
     setActiveBidWorkflow(null);
+    setBidWorkflows([]);
     await refreshConversations(project.id);
   }
 
@@ -343,6 +368,7 @@ export default function Home() {
     }
     setCurrentConversationId(conversationId);
     const [, workflows] = await Promise.all([refreshMessages(conversationId), listBidWorkflows(conversationId)]);
+    setBidWorkflows(workflows);
     const workflow = workflows[0] ?? null;
     setActiveBidWorkflow(workflow);
     setError(null);
@@ -360,6 +386,7 @@ export default function Home() {
       if (project.id === currentProjectId) {
         setCurrentConversationId(null);
         setActiveBidWorkflow(null);
+        setBidWorkflows([]);
       }
       setError(null);
     } catch (caught) {
@@ -375,6 +402,7 @@ export default function Home() {
       if (conversation.id === currentConversationId) {
         setCurrentConversationId(null);
         setActiveBidWorkflow(null);
+        setBidWorkflows([]);
       }
       setError(null);
     } catch (caught) {
@@ -397,6 +425,7 @@ export default function Home() {
       setCurrentProjectId(conversation.project_id);
       setCurrentConversationId(conversation.id);
       setActiveBidWorkflow(null);
+      setBidWorkflows([]);
       setInput("");
       await refreshConversations(conversation.project_id);
     } catch (caught) {
@@ -493,7 +522,8 @@ export default function Home() {
   }
 
   async function refreshWorkflowMessages(workflow: BidWorkflow) {
-    const refreshedWorkflow = await getBidWorkflow(workflow.id);
+    const [refreshedWorkflow, workflows] = await Promise.all([getBidWorkflow(workflow.id), listBidWorkflows(workflow.conversation_id)]);
+    setBidWorkflows(workflows);
     setActiveBidWorkflow(refreshedWorkflow);
     setCurrentConversationId(refreshedWorkflow.conversation_id);
     await refreshMessages(refreshedWorkflow.conversation_id);
@@ -503,7 +533,7 @@ export default function Home() {
   async function uploadTenderFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     event.target.value = "";
-    if (!file || isBidBusy) return;
+    if (!file || uploadProgress !== null) return;
     setError(null);
 
     if (!currentProfileId) {
@@ -511,11 +541,6 @@ export default function Home() {
       setError("请先配置模型 API。");
       return;
     }
-    if (activeBidWorkflow && !["completed", "cancelled"].includes(activeBidWorkflow.status)) {
-      setError("当前对话已有标书工作流，请新建对话后再上传新的招标文件。");
-      return;
-    }
-
     setIsBidBusy(true);
     setUploadFileName(file.name);
     setUploadProgress(0);
@@ -528,6 +553,7 @@ export default function Home() {
         onProgress: setUploadProgress,
       });
       setActiveBidWorkflow(workflow);
+      setBidWorkflows((current) => [workflow, ...current.filter((item) => item.id !== workflow.id)]);
       setBidConfirmation("确认");
       setBidExtraContext("");
       await refreshWorkflowMessages(workflow);
@@ -746,6 +772,7 @@ export default function Home() {
     setCurrentConversationId(null);
     setCurrentProfileId(null);
     setActiveBidWorkflow(null);
+    setBidWorkflows([]);
     passwordChangeForm.reset();
   }
 
@@ -779,6 +806,7 @@ export default function Home() {
   const workflowPanel = (
     <BidWorkflowPanel
       workflow={activeBidWorkflow}
+      workflows={bidWorkflows}
       currentConversationId={currentConversationId}
       confirmation={bidConfirmation}
       extraContext={bidExtraContext}
@@ -790,6 +818,7 @@ export default function Home() {
       onGenerate={generateWorkflow}
       onRetry={retryWorkflow}
       onRefresh={refreshActiveWorkflow}
+      onSelectWorkflow={setActiveBidWorkflow}
       onDownloadArtifact={downloadArtifact}
       onDownloadZip={downloadArtifactsZip}
     />
@@ -844,7 +873,7 @@ export default function Home() {
           onSend={() => sendMessage()}
           isStreaming={isStreaming}
           onStopStreaming={stopStreaming}
-          isBidBusy={isBidBusy}
+          isUploadingTender={uploadProgress !== null}
           onUploadTenderFile={uploadTenderFile}
           uploadProgress={uploadProgress}
           uploadFileName={uploadFileName}

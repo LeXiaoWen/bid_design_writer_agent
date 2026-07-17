@@ -2,6 +2,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import StreamingResponse
 
 from ..schemas import (
     BidWorkflowActionResponse,
@@ -23,6 +24,7 @@ def create_router(
     enqueue_bid_job: Callable[[str, str, str], Any],
     public_bid_workflow: Callable[[Any], BidWorkflowPublic],
     save_behavior_report: Callable[[str, str], Any],
+    stream_bid_events: Callable[[str, str], Any],
 ) -> APIRouter:
     router = APIRouter()
 
@@ -66,6 +68,15 @@ def create_router(
             return public_bid_workflow(workbench_store.get_bid_workflow(current_user(request).id, workflow_id))
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="标书工作流不存在。") from exc
+
+    @router.get("/api/v1/bid-workflows/{workflow_id}/stream")
+    async def stream_bid_workflow(workflow_id: str, request: Request):
+        user_id = current_user(request).id
+        try:
+            workbench_store.get_bid_workflow(user_id, workflow_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="标书工作流不存在。") from exc
+        return StreamingResponse(stream_bid_events(user_id, workflow_id), media_type="text/event-stream")
 
     @router.post("/api/v1/bid-workflows/{workflow_id}/extract", response_model=BidWorkflowActionResponse)
     def extract_bid_workflow(workflow_id: str, request: Request):

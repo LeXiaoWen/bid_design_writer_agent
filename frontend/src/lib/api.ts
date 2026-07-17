@@ -5,6 +5,7 @@ import type {
   ArtifactVersion,
   ArtifactVersionContent,
   BidArtifact,
+  BidWorkflowStreamEvent,
   BidWorkflow,
   BidWorkflowActionResponse,
   BidWorkflowCreateResponse,
@@ -299,8 +300,9 @@ export function createBidWorkflow(input: {
     if (appAuthSecret) xhr.setRequestHeader("X-App-Auth-Secret", appAuthSecret);
     xhr.upload.onprogress = (event) => {
       if (!event.lengthComputable) return;
-      input.onProgress?.(Math.min(99, Math.round((event.loaded / event.total) * 100)));
+      input.onProgress?.(Math.min(95, Math.round((event.loaded / event.total) * 100)));
     };
+    xhr.upload.onload = () => input.onProgress?.(100);
     xhr.onerror = () => reject(new Error(`无法连接本地后端：${apiBaseUrl}。请确认桌面应用后端已启动，或检查当前页面地址是否被 CORS 允许。`));
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
@@ -453,6 +455,43 @@ export async function streamChat(
       },
       onerror(error) {
         // Re-throwing disables the library's automatic reconnect: replaying a POST could bill the LLM twice.
+        throw error;
+      },
+    });
+  } catch (error) {
+    if (signal?.aborted) return;
+    if (error instanceof Error) throw error;
+    throw localBackendConnectionError();
+  }
+}
+
+export async function streamBidWorkflow(
+  workflowId: string,
+  onEvent: (event: BidWorkflowStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  try {
+    const requestOptions = withAuthHeaders();
+    await fetchEventSource(`${apiBaseUrl}/api/v1/bid-workflows/${encodeURIComponent(workflowId)}/stream`, {
+      headers: Object.fromEntries(new Headers(requestOptions.headers).entries()),
+      signal,
+      openWhenHidden: true,
+      async onopen(response) {
+        if (response.ok && response.headers.get("content-type")?.includes("text/event-stream")) return;
+        let detail = `请求失败：${response.status}`;
+        try {
+          const payload = await response.json();
+          detail = payload.detail ?? detail;
+        } catch {
+          // Keep the HTTP fallback if an upstream response has no JSON body.
+        }
+        throw new Error(detail);
+      },
+      onmessage(message) {
+        if (!message.event || !message.data) return;
+        onEvent({ event: message.event, data: JSON.parse(message.data) } as BidWorkflowStreamEvent);
+      },
+      onerror(error) {
         throw error;
       },
     });

@@ -10,6 +10,7 @@ import styles from "./BidWorkflowPanel.module.css";
 
 type BidWorkflowPanelProps = {
   workflow: BidWorkflow | null;
+  workflows: BidWorkflow[];
   currentConversationId: string | null;
   confirmation: string;
   extraContext: string;
@@ -21,6 +22,7 @@ type BidWorkflowPanelProps = {
   onGenerate: () => void;
   onRetry: () => void;
   onRefresh: () => Promise<void>;
+  onSelectWorkflow: (workflow: BidWorkflow) => void;
   onDownloadArtifact: (name: string) => void;
   onDownloadZip: () => void;
 };
@@ -149,6 +151,7 @@ function ArtifactVersionPanel({ workflowId, artifact, onRefresh }: { workflowId:
 
 export function BidWorkflowPanel({
   workflow,
+  workflows,
   currentConversationId,
   confirmation,
   extraContext,
@@ -160,6 +163,7 @@ export function BidWorkflowPanel({
   onGenerate,
   onRetry,
   onRefresh,
+  onSelectWorkflow,
   onDownloadArtifact,
   onDownloadZip,
 }: BidWorkflowPanelProps) {
@@ -167,9 +171,27 @@ export function BidWorkflowPanel({
   if (!workflow || workflow.conversation_id !== currentConversationId) return null;
   const proposal = workflow.artifacts.find((artifact) => artifact.kind === "proposal");
   const versionArtifact = workflow.artifacts.find((artifact) => artifact.name === versionArtifactName) ?? null;
+  const conversationWorkflows = workflows.filter((item) => item.conversation_id === currentConversationId);
 
   return (
     <section className={`${styles.panel} workflow-panel`}>
+      {conversationWorkflows.length > 1 && (
+        <div className={styles.workflowSelector} role="tablist" aria-label="标段工作流">
+          {conversationWorkflows.map((item) => (
+            <button
+              type="button"
+              key={item.id}
+              role="tab"
+              aria-selected={item.id === workflow.id}
+              className={item.id === workflow.id ? styles.workflowSelectorActive : styles.workflowSelectorItem}
+              onClick={() => onSelectWorkflow(item)}
+            >
+              <span>{item.file_name}</span>
+              <em>{executionText(item)}</em>
+            </button>
+          ))}
+        </div>
+      )}
       <div className="workflow-header">
         <div>
           <span>{executionText(workflow)}</span>

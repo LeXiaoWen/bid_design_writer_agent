@@ -37,7 +37,7 @@ from ..schemas import (
 from .credentials import CredentialStoreUnavailable, credential_store
 DEFAULT_PROJECT_TITLE = "默认项目"
 MULTI_TENANT_SCHEMA_VERSION = 3
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def utc_now() -> str:
@@ -210,9 +210,8 @@ class WorkbenchStore:
                     PRIMARY KEY (user_id, key)
                 );
 
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_active_bid_workflows_per_conversation
-                ON bid_workflows(conversation_id)
-                WHERE status IN ('uploaded', 'extracting', 'extraction_ready', 'generating', 'failed');
+                CREATE INDEX IF NOT EXISTS idx_bid_workflows_conversation_status
+                ON bid_workflows(conversation_id, status, updated_at DESC);
 
                 CREATE INDEX IF NOT EXISTS idx_bid_jobs_next ON bid_jobs(state, created_at);
 
@@ -247,6 +246,7 @@ class WorkbenchStore:
             2: self._migrate_to_v2,
             3: self._migrate_to_v3,
             4: self._migrate_to_v4,
+            5: self._migrate_to_v5,
         }
         while version < SCHEMA_VERSION:
             target_version = version + 1
@@ -277,6 +277,12 @@ class WorkbenchStore:
 
     def _migrate_to_v4(self) -> None:
         self._ensure_column("conversations", "context_summary", "TEXT NOT NULL DEFAULT ''")
+
+    def _migrate_to_v5(self) -> None:
+        self._connection.execute("DROP INDEX IF EXISTS idx_active_bid_workflows_per_conversation")
+        self._connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_bid_workflows_conversation_status ON bid_workflows(conversation_id, status, updated_at DESC)"
+        )
 
     def _backup_legacy_database_if_needed(self) -> None:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
@@ -670,10 +676,6 @@ class WorkbenchStore:
         conversation = self.get_conversation(user_id, conversation_id)
         if provider_profile_id:
             self.get_provider_profile(user_id, provider_profile_id)
-        existing = self.get_active_bid_workflow(user_id, conversation_id)
-        if existing:
-            raise ValueError("当前对话已有未完成的标书工作流。")
-
         workflow_id = str(uuid4())
         now = utc_now()
         with self._lock, self._connection:

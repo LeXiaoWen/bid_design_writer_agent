@@ -2,6 +2,48 @@
   min-width: 0;
 }
 
+.workflowSelector {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.workflowSelectorItem,
+.workflowSelectorActive {
+  display: grid;
+  min-width: 132px;
+  gap: 2px;
+  border: 1px solid #dce4e8;
+  border-radius: 9px;
+  background: #fff;
+  padding: 7px 9px;
+  text-align: left;
+  color: #56636a;
+}
+
+.workflowSelectorActive {
+  border-color: #81aaa4;
+  background: #edf7f5;
+  color: #285c55;
+}
+
+.workflowSelectorItem span,
+.workflowSelectorActive span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.workflowSelectorItem em,
+.workflowSelectorActive em {
+  font-size: 11px;
+  font-style: normal;
+  opacity: 0.78;
+}
+
 .artifactRow {
   display: flex;
   min-width: 0;

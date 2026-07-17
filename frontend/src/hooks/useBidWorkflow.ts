@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import { getBidWorkflow } from "@/lib/api";
+import { getBidWorkflow, listBidWorkflows } from "@/lib/api";
 import type { BidWorkflow } from "@/lib/types";
 
 function isRunning(workflow: BidWorkflow | null): boolean {
@@ -37,4 +37,17 @@ export function useBidWorkflow() {
     polledWorkflow: query.data,
     error: query.error,
   };
+}
+
+export function useBidWorkflows(conversationId: string | null, knownWorkflows: BidWorkflow[]) {
+  const query = useQuery({
+    queryKey: ["bid-workflows", conversationId],
+    queryFn: () => listBidWorkflows(conversationId!),
+    enabled: Boolean(conversationId),
+    refetchInterval: (current) => (
+      knownWorkflows.some((workflow) => isRunning(workflow)) || current.state.data?.some((workflow) => isRunning(workflow)) ? 500 : false
+    ),
+  });
+
+  return { workflows: query.data, error: query.error };
 }

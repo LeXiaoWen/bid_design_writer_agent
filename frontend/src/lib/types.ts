@@ -206,3 +206,14 @@ export type ChatStreamEvent =
         message: string;
       };
     };
+
+export type BidWorkflowStreamEvent =
+  | Extract<ChatStreamEvent, { event: "message_start" | "message_done" }>
+  | {
+      event: "message_update";
+      data: {
+        conversation_id: string;
+        message_id: string;
+        content: string;
+      };
+    };
