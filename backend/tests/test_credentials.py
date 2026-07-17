@@ -1,4 +1,9 @@
+import json
+import logging
+import sys
+
 from backend.services.credentials import KeyringCredentialStore
+from backend.services.logging_config import JsonFormatter
 
 
 def test_keyring_store_caches_credential_reads(monkeypatch):
@@ -33,3 +38,27 @@ def test_keyring_store_caches_credential_reads(monkeypatch):
     store.delete("provider:user:profile")
     assert store.get("provider:user:profile") is None
     assert keyring.get_calls == 2
+
+
+def test_json_logs_redact_managed_credentials_from_messages_and_exceptions():
+    formatter = JsonFormatter()
+    logger = logging.getLogger("bid-design-writer-test")
+    secret = "sk-log-secret-1234567890"
+
+    try:
+        raise RuntimeError(f"Bearer {secret}")
+    except RuntimeError:
+        record = logger.makeRecord(
+            logger.name,
+            logging.ERROR,
+            __file__,
+            1,
+            "模型请求失败 api_key=%s",
+            (secret,),
+            sys.exc_info(),
+        )
+
+    payload = json.loads(formatter.format(record))
+    assert secret not in json.dumps(payload, ensure_ascii=False)
+    assert payload["message"] == "模型请求失败 api_key=[已脱敏]"
+    assert "Bearer [已脱敏]" in payload["exception"]

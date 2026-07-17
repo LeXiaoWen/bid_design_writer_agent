@@ -46,6 +46,12 @@ function venvPythonPath() {
     : join(venvDir, "bin", "python");
 }
 
+function venvExecutablePath(name) {
+  return process.platform === "win32"
+    ? join(venvDir, "Scripts", `${name}.exe`)
+    : join(venvDir, "bin", name);
+}
+
 const python = findPython();
 
 if (!existsSync(venvPythonPath())) {
@@ -59,6 +65,7 @@ const venvPython = venvPythonPath();
 console.log("Installing backend packaging dependencies...");
 run(venvPython, ["-m", "pip", "install", "--upgrade", "pip"]);
 run(venvPython, ["-m", "pip", "install", "-r", requirementsFile]);
+run(venvExecutablePath("rapidocr"), ["download_models"]);
 
 console.log("Building packaged backend agent...");
 rmSync(agentOutputDir, { recursive: true, force: true });

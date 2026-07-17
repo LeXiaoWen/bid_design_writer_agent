@@ -1,14 +1,19 @@
 import io
 import asyncio
 import json
+import sys
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from docx import Document
+from openpyxl import Workbook
 
 from backend.schemas import ApiConfig, WebSearchConfig
 from backend.services.artifacts import build_output_files, extract_section, has_confirmed_content, infer_project_name, make_zip
+from backend.services import document_parser
+from backend.services.document_chunks import split_document_text
 from backend.services.document_parser import parse_document
 from backend.services.llm import create_agent
 from backend.services.skill_loader import build_stage1_instructions, build_stage2_instructions, skill_source_label
@@ -23,6 +28,18 @@ def make_docx_bytes(text: str) -> bytes:
     return buffer.getvalue()
 
 
+def make_xlsx_bytes() -> bytes:
+    buffer = io.BytesIO()
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "评分表"
+    worksheet.append(["评分项", "分值"])
+    worksheet.append(["技术方案", 40])
+    workbook.create_sheet("项目概况").append(["项目名称", "XLSX 项目"])
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
 def test_parse_txt_document():
     assert parse_document("招标.txt", "项目名称：测试项目".encode("utf-8")) == "项目名称：测试项目"
 
@@ -32,6 +49,71 @@ def test_parse_docx_document():
     assert "DOCX 项目" in parsed
 
 
+def test_parse_xlsx_document():
+    parsed = parse_document("招标评分表.xlsx", make_xlsx_bytes())
+
+    assert "工作表：评分表" in parsed
+    assert "技术方案 | 40" in parsed
+    assert "XLSX 项目" in parsed
+
+
+def test_parse_legacy_doc_uses_converter(monkeypatch):
+    monkeypatch.setattr(document_parser, "_parse_legacy_doc", lambda _: "项目名称：DOC 项目")
+
+    assert parse_document("招标.doc", document_parser.DOC_SIGNATURE + b"legacy") == "项目名称：DOC 项目"
+
+
+def test_split_document_text_preserves_content_at_section_boundaries():
+    text = "前言\n\n--- 第 1 页 ---\n" + "内容" * 9 + "\n\n--- 第 2 页 ---\n尾部要求"
+
+    chunks = split_document_text(text, max_characters=24)
+
+    assert "".join(chunks) == text
+    assert all(len(chunk) <= 24 for chunk in chunks)
+    assert any("尾部要求" in chunk for chunk in chunks)
+
+
+def test_xlsx_signature_error():
+    with pytest.raises(ValueError, match="XLSX"):
+        parse_document("招标.xlsx", b"not-a-zip")
+
+
+def test_parse_scanned_pdf_uses_ocr(monkeypatch):
+    class FakePage:
+        def extract_text(self):
+            return ""
+
+    class FakeReader:
+        pages = [FakePage()]
+
+    monkeypatch.setattr(document_parser, "PdfReader", lambda _: FakeReader())
+    monkeypatch.setattr(document_parser, "_ocr_pdf_pages", lambda _, pages: {pages[0]: "项目名称：OCR 招标文件"})
+
+    parsed = parse_document("扫描招标.pdf", b"%PDF-1.7 fake")
+
+    assert "第 1 页" in parsed
+    assert "OCR 招标文件" in parsed
+
+
+def test_ocr_pdf_pages_returns_rapidocr_text(monkeypatch):
+    class FakePage:
+        def get_pixmap(self, matrix, alpha):
+            assert alpha is False
+            return "bitmap"
+
+    class FakeDocument:
+        def load_page(self, page_index):
+            assert page_index == 0
+            return FakePage()
+
+    fake_fitz = SimpleNamespace(open=lambda stream, filetype: FakeDocument(), Matrix=lambda x, y: (x, y))
+    monkeypatch.setitem(sys.modules, "fitz", fake_fitz)
+    monkeypatch.setattr(document_parser, "_get_ocr_engine", lambda: lambda _: SimpleNamespace(txts=("项目名称：OCR 项目", "")))
+    monkeypatch.setattr(document_parser, "_pixmap_to_image", lambda _: "image")
+
+    assert document_parser._ocr_pdf_pages(b"%PDF-1.7 fake", [1]) == {1: "项目名称：OCR 项目"}
+
+
 def test_empty_file_error():
     with pytest.raises(ValueError, match="文件为空"):
         parse_document("empty.txt", b"")
@@ -39,7 +121,7 @@ def test_empty_file_error():
 
 def test_unsupported_file_error():
     with pytest.raises(ValueError, match="仅支持"):
-        parse_document("old.doc", b"abc")
+        parse_document("presentation.pptx", b"abc")
 
 
 def test_project_name_sanitizes_illegal_chars():

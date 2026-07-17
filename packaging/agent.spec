@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, get_module_file_attribute
+
 
 project_root = Path(SPECPATH).parent
 entry_script = Path(SPECPATH) / "agent_entry.py"
@@ -14,7 +16,19 @@ hiddenimports = [
     "uvicorn.protocols.http.auto",
     "uvicorn.protocols.websockets.auto",
     "uvicorn.lifespan.on",
+    "rapidocr",
+    "onnxruntime",
+    "fitz",
+    "pymupdf",
+    "openpyxl",
 ]
+
+onnxruntime_capi_dir = Path(get_module_file_attribute("onnxruntime")).parent / "capi"
+ocr_binaries = collect_dynamic_libs("pymupdf") + [
+    (str(path), "onnxruntime/capi")
+    for path in onnxruntime_capi_dir.glob("onnxruntime_pybind11_state.*")
+]
+ocr_datas = collect_data_files("rapidocr", includes=["models/*.onnx"])
 
 if sys.platform == "win32":
     hiddenimports.extend([
@@ -25,7 +39,7 @@ if sys.platform == "win32":
 a = Analysis(
     [str(entry_script)],
     pathex=[str(project_root)],
-    binaries=[],
+    binaries=ocr_binaries,
     datas=[
         (
             str(project_root / "package.json"),
@@ -35,7 +49,7 @@ a = Analysis(
             str(project_root / "backend" / "bundled_skills"),
             "backend/bundled_skills",
         ),
-    ],
+    ] + ocr_datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

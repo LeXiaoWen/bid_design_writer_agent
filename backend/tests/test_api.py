@@ -15,9 +15,10 @@ os.environ["APP_AUTH_SECRET"] = "test-app-secret"
 os.environ["AI_WORKBENCH_TEST_CREDENTIALS"] = "1"
 
 from backend.main import app
-from backend.schemas import BidWorkflowStatus, ProviderModel
+from backend.schemas import BidExecutionState, BidWorkflowStatus, ProviderModel
 from backend.services.behavior_report import REPORT_FILENAME, behavior_report_path, save_behavior_report
 from backend.services.app_version import get_app_version
+from backend.services.bid_jobs import BidJobWorker
 from backend.services.workbench_store import WorkbenchStore, workbench_store
 
 
@@ -193,13 +194,30 @@ def test_workbench_project_conversation_and_search():
     assert messages.status_code == 200
     assert messages.json() == []
 
+    workbench_store.add_message(TEST_USER_ID, conversation_id, "user", "技术路线需要体现低碳设计。")
+
     search = client.get("/api/v1/search", params={"q": "技术路线"})
     assert search.status_code == 200
     assert any(item["conversation_id"] == conversation_id for item in search.json())
 
+    conversation_search = client.get("/api/v1/search", params={"q": "技术路线", "kind": "conversation"})
+    assert conversation_search.status_code == 200
+    assert all(item["kind"] == "conversation" for item in conversation_search.json())
+
+    message_search = client.get("/api/v1/search", params={"q": "技术路线", "kind": "message"})
+    assert message_search.status_code == 200
+    assert all(item["kind"] == "message" for item in message_search.json())
+
     path_search = client.get("/api/v1/search", params={"q": "alpha-workspace"})
     assert path_search.status_code == 200
     assert any(item["project_id"] == project_id for item in path_search.json())
+
+    project_search = client.get("/api/v1/search", params={"q": "alpha-workspace", "kind": "project"})
+    assert project_search.status_code == 200
+    assert all(item["kind"] == "project" for item in project_search.json())
+
+    invalid_kind = client.get("/api/v1/search", params={"q": "技术路线", "kind": "artifact"})
+    assert invalid_kind.status_code == 422
 
 
 def test_provider_profile_does_not_echo_api_key():
@@ -221,6 +239,34 @@ def test_provider_profile_does_not_echo_api_key():
     listed = client.get("/api/v1/provider-profiles")
     assert listed.status_code == 200
     assert any(profile["id"] == payload["id"] for profile in listed.json())
+
+
+def test_managed_credentials_are_absent_from_database_and_api_responses():
+    provider_secret = "sk-provider-secret-1234567890"
+    tavily_secret = "tvly-managed-secret-1234567890"
+    profile = client.post(
+        "/api/v1/provider-profiles",
+        json={
+            "provider": "OpenAI",
+            "display_name": "安全验收模型",
+            "base_url": "https://api.openai.com/v1",
+            "model": "gpt-4o",
+            "api_key": provider_secret,
+        },
+    )
+    assert profile.status_code == 200
+    web_search = client.patch("/api/v1/web-search-config", json={"api_key": tavily_secret})
+    assert web_search.status_code == 200
+
+    assert provider_secret not in profile.text
+    assert provider_secret not in client.get("/api/v1/provider-profiles").text
+    assert tavily_secret not in web_search.text
+    assert tavily_secret not in client.get("/api/v1/web-search-config").text
+
+    persisted = workbench_store._execute(
+        "SELECT api_key FROM provider_profiles UNION ALL SELECT value FROM user_settings UNION ALL SELECT value FROM app_settings"
+    ).fetchall()
+    assert all(provider_secret not in (row[0] or "") and tavily_secret not in (row[0] or "") for row in persisted)
 
 
 def test_users_are_isolated_across_projects_conversations_workflows_and_configs(monkeypatch):
@@ -665,6 +711,115 @@ def test_bid_workflow_cancel_prevents_late_extraction_save(monkeypatch):
     assert cancelled.extracted_markdown == ""
 
 
+def test_interrupted_bid_job_is_recovered_and_completed_by_worker():
+    project_id = client.post("/api/v1/projects", json={"title": "任务恢复项目"}).json()["id"]
+    conversation_id = client.post(
+        "/api/v1/conversations",
+        json={"project_id": project_id, "title": "任务恢复"},
+    ).json()["id"]
+    workflow = workbench_store.create_bid_workflow(
+        TEST_USER_ID,
+        conversation_id=conversation_id,
+        file_name="任务恢复.txt",
+        file_text="项目名称：任务恢复项目",
+    )
+    workbench_store.update_bid_workflow_status(TEST_USER_ID, workflow.id, BidWorkflowStatus.EXTRACTING)
+    workbench_store.enqueue_bid_job(TEST_USER_ID, workflow.id, "extraction")
+    assert workbench_store.claim_next_bid_job() is not None
+
+    workbench_store.recover_bid_jobs()
+    recovered = workbench_store.get_bid_execution(workflow.id)
+    assert recovered is not None
+    assert recovered.state == BidExecutionState.QUEUED
+    assert recovered.message == "应用重启后正在恢复。"
+
+    completed_jobs = []
+
+    def runner(job_id, user_id, workflow_id, kind):
+        completed_jobs.append((job_id, user_id, workflow_id, kind))
+        workbench_store.save_bid_extraction(user_id, workflow_id, "# 恢复后的信息提取")
+
+    BidJobWorker(runner).run_pending()
+
+    assert completed_jobs and completed_jobs[0][2:] == (workflow.id, "extraction")
+    assert workbench_store.get_bid_workflow(TEST_USER_ID, workflow.id).status == BidWorkflowStatus.EXTRACTION_READY
+    completed = workbench_store.get_bid_execution(workflow.id)
+    assert completed is not None
+    assert completed.state == BidExecutionState.COMPLETED
+    assert completed.progress == 100
+
+
+def test_bid_job_recovery_fails_after_second_interruption():
+    project_id = client.post("/api/v1/projects", json={"title": "任务恢复失败项目"}).json()["id"]
+    conversation_id = client.post(
+        "/api/v1/conversations",
+        json={"project_id": project_id, "title": "任务恢复失败"},
+    ).json()["id"]
+    workflow = workbench_store.create_bid_workflow(
+        TEST_USER_ID,
+        conversation_id=conversation_id,
+        file_name="恢复失败.txt",
+        file_text="项目名称：任务恢复失败项目",
+    )
+    workbench_store.update_bid_workflow_status(TEST_USER_ID, workflow.id, BidWorkflowStatus.EXTRACTING)
+    workbench_store.enqueue_bid_job(TEST_USER_ID, workflow.id, "extraction")
+    assert workbench_store.claim_next_bid_job() is not None
+    workbench_store.recover_bid_jobs()
+    assert workbench_store.claim_next_bid_job() is not None
+
+    workbench_store.recover_bid_jobs()
+
+    execution = workbench_store.get_bid_execution(workflow.id)
+    assert execution is not None
+    assert execution.state == BidExecutionState.FAILED
+    assert workbench_store.get_bid_workflow(TEST_USER_ID, workflow.id).status == BidWorkflowStatus.FAILED
+
+
+def test_chunked_bid_extraction_keeps_tail_requirements(monkeypatch):
+    project_id = client.post("/api/v1/projects", json={"title": "长文件项目"}).json()["id"]
+    conversation_id = client.post("/api/v1/conversations", json={"project_id": project_id, "title": "长文件提取"}).json()["id"]
+    profile_id = client.post(
+        "/api/v1/provider-profiles",
+        json={
+            "provider": "OpenAI",
+            "display_name": "长文件模型",
+            "base_url": "https://api.openai.com/v1",
+            "model": "gpt-4o",
+            "api_key": "secret",
+        },
+    ).json()["id"]
+    workflow = workbench_store.create_bid_workflow(
+        TEST_USER_ID,
+        conversation_id=conversation_id,
+        provider_profile_id=profile_id,
+        file_name="超长招标文件.txt",
+        file_text="前部要求\n" + "A" * (24_000 * 8) + "\n\n尾部要求：必须提交 BIM 模型。",
+    )
+    workbench_store.update_bid_workflow_status(TEST_USER_ID, workflow.id, BidWorkflowStatus.EXTRACTING)
+    final_prompts = []
+
+    def fake_run_agent(api_config, instructions, prompt, on_delta=None):
+        if "这是第" in prompt:
+            prefix = "尾部事实笔记" if "BIM 模型" in prompt else "前部事实笔记"
+            return prefix + "A" * 4_000
+        if "请合并以下分块事实笔记" in prompt:
+            prefix = "压缩尾部事实笔记" if "尾部事实笔记" in prompt else "压缩前部事实笔记"
+            return prefix + "A" * 4_000
+        final_prompts.append(prompt)
+        return "# 超长文件信息提取"
+
+    monkeypatch.setattr("backend.main.run_agent", fake_run_agent)
+
+    from backend.main import run_bid_extraction_task
+
+    run_bid_extraction_task(TEST_USER_ID, workflow.id)
+
+    saved = workbench_store.get_bid_workflow(TEST_USER_ID, workflow.id)
+    assert saved.extracted_markdown == "# 超长文件信息提取"
+    assert "压缩尾部事实笔记" in final_prompts[0]
+    assert len(final_prompts[0]) < 25_000
+
+
 def test_bid_model_progress_updates_on_first_stream_chunk(monkeypatch):
     from backend.main import bid_model_progress
 
@@ -800,3 +955,40 @@ def test_bid_workflow_upload_rejects_oversized_file(monkeypatch):
 
     assert response.status_code == 400
     assert "上传文件不能超过" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("filename", "content", "expected_error"),
+    [
+        ("招标.pdf", b"not-a-pdf", "PDF"),
+        ("招标.docx", b"not-an-office-document", "DOCX"),
+        ("评分表.xlsx", b"not-an-office-document", "XLSX"),
+    ],
+)
+def test_bid_workflow_upload_rejects_extension_signature_mismatch(filename, content, expected_error):
+    created_project = client.post("/api/v1/projects", json={"title": f"签名校验项目-{filename}"})
+    conversation_id = client.post(
+        "/api/v1/conversations",
+        json={"project_id": created_project.json()["id"], "title": "上传校验"},
+    ).json()["id"]
+    profile_id = client.post(
+        "/api/v1/provider-profiles",
+        json={
+            "provider": "OpenAI",
+            "display_name": f"OpenAI 签名校验-{filename}",
+            "base_url": "https://api.openai.com/v1",
+            "model": "gpt-4o",
+            "api_key": "secret",
+        },
+    ).json()["id"]
+    before = client.get("/api/v1/bid-workflows", params={"conversation_id": conversation_id}).json()
+
+    response = client.post(
+        "/api/v1/bid-workflows",
+        data={"conversation_id": conversation_id, "provider_profile_id": profile_id},
+        files={"file": (filename, content, "application/octet-stream")},
+    )
+
+    assert response.status_code == 400
+    assert expected_error in response.json()["detail"]
+    assert client.get("/api/v1/bid-workflows", params={"conversation_id": conversation_id}).json() == before

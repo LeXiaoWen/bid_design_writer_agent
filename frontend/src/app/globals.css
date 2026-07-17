@@ -384,6 +384,31 @@ textarea:focus {
   overflow: auto;
 }
 
+.search-filters {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  padding: 2px 1px;
+}
+
+.search-filters button {
+  flex: 0 0 auto;
+  min-height: 25px;
+  border: 1px solid rgba(158, 168, 176, 0.26);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.42);
+  color: #77828a;
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 720;
+}
+
+.search-filters button.active {
+  border-color: rgba(73, 102, 120, 0.28);
+  background: #f7fbfd;
+  color: #35444f;
+}
+
 .search-results button,
 .nav-list button {
   min-width: 0;
@@ -413,6 +438,35 @@ textarea:focus {
 .search-results strong {
   color: #555e64;
   font-size: 13px;
+}
+
+.search-result-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.search-result-title strong {
+  min-width: 0;
+}
+
+.search-result-title em {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: rgba(160, 181, 194, 0.2);
+  color: #6d7b84;
+  padding: 2px 5px;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 760;
+}
+
+.search-results mark {
+  border-radius: 3px;
+  background: #fff0b8;
+  color: inherit;
+  padding: 0 1px;
 }
 
 .search-results span {
@@ -850,7 +904,7 @@ textarea:focus {
 .chat-workspace {
   position: relative;
   display: grid;
-  grid-template-rows: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 0;
   background: #ffffff;
@@ -1173,9 +1227,16 @@ textarea:focus {
 }
 
 .messages {
+  height: 100%;
   min-height: 0;
-  overflow: auto;
-  padding: 80px min(8vw, 120px) 26px;
+}
+
+.message-list-header {
+  padding: 80px min(8vw, 120px) 28px;
+}
+
+.message-list-footer {
+  padding: 0 min(8vw, 120px) 26px;
 }
 
 .conversation-title {
@@ -1371,6 +1432,10 @@ textarea:focus {
   gap: 12px;
   max-width: 820px;
   margin: 0 auto 18px;
+}
+
+.virtual-message-row {
+  padding: 0 min(8vw, 120px);
 }
 
 .message-row.user {

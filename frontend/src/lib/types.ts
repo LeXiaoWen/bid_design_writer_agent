@@ -111,8 +111,10 @@ export type BidWorkflowActionResponse = {
   message: string;
 };
 
+export type SearchResultKind = "project" | "conversation" | "message";
+
 export type SearchResult = {
-  kind: string;
+  kind: SearchResultKind;
   id: string;
   title: string;
   excerpt: string;

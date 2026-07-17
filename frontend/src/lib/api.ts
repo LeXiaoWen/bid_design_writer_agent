@@ -14,6 +14,7 @@ import type {
   ProviderModel,
   ProviderProfile,
   SearchResult,
+  SearchResultKind,
   WebSearchConfig,
   WorkbenchConversation,
   WorkbenchMessage,
@@ -251,8 +252,9 @@ export async function listProviderModels(profileId: string): Promise<ProviderMod
   return payload.models;
 }
 
-export function searchWorkbench(query: string): Promise<SearchResult[]> {
-  return request<SearchResult[]>(`/api/v1/search?q=${encodeURIComponent(query)}`);
+export function searchWorkbench(query: string, kind?: SearchResultKind): Promise<SearchResult[]> {
+  const filter = kind ? `&kind=${encodeURIComponent(kind)}` : "";
+  return request<SearchResult[]>(`/api/v1/search?q=${encodeURIComponent(query)}${filter}`);
 }
 
 export function getWebSearchConfig(): Promise<WebSearchConfig> {

@@ -14,7 +14,8 @@ import {
   Trash2,
 } from "lucide-react";
 
-import type { AuthUser, SearchResult, WorkbenchConversation, WorkbenchProject } from "@/lib/types";
+import { splitSearchHighlight } from "@/lib/searchHighlight";
+import type { AuthUser, SearchResult, SearchResultKind, WorkbenchConversation, WorkbenchProject } from "@/lib/types";
 import styles from "./WorkbenchSidebar.module.css";
 
 type WorkbenchSidebarProps = {
@@ -25,6 +26,7 @@ type WorkbenchSidebarProps = {
   projectPreviewConversations: WorkbenchConversation[];
   historyConversations: WorkbenchConversation[];
   searchQuery: string;
+  searchKind: SearchResultKind | "all";
   searchResults: SearchResult[];
   projectsOpen: boolean;
   projectConversationsOpen: boolean;
@@ -36,6 +38,7 @@ type WorkbenchSidebarProps = {
   onFocusSearch: () => void;
   onOpenConfig: () => void;
   onSearchQueryChange: (value: string) => void;
+  onSearchKindChange: (kind: SearchResultKind | "all") => void;
   onToggleProjects: () => void;
   onChooseWorkspace: () => void;
   onSwitchProject: (project: WorkbenchProject) => void;
@@ -46,6 +49,23 @@ type WorkbenchSidebarProps = {
   onToggleConversations: () => void;
   onToggleUserPanel: () => void;
 };
+
+const searchKindOptions: Array<{ value: SearchResultKind | "all"; label: string }> = [
+  { value: "all", label: "全部" },
+  { value: "project", label: "项目" },
+  { value: "conversation", label: "对话" },
+  { value: "message", label: "消息" },
+];
+
+const searchKindLabels: Record<SearchResultKind, string> = {
+  project: "项目",
+  conversation: "对话",
+  message: "消息",
+};
+
+function highlightedText(text: string, query: string) {
+  return splitSearchHighlight(text, query).map((part, index) => part.matched ? <mark key={index}>{part.text}</mark> : <span key={index}>{part.text}</span>);
+}
 
 function userInitials(user: AuthUser | null): string {
   const name = user?.username.trim();
@@ -71,6 +91,7 @@ export function WorkbenchSidebar({
   projectPreviewConversations,
   historyConversations,
   searchQuery,
+  searchKind,
   searchResults,
   projectsOpen,
   projectConversationsOpen,
@@ -82,6 +103,7 @@ export function WorkbenchSidebar({
   onFocusSearch,
   onOpenConfig,
   onSearchQueryChange,
+  onSearchKindChange,
   onToggleProjects,
   onChooseWorkspace,
   onSwitchProject,
@@ -92,6 +114,15 @@ export function WorkbenchSidebar({
   onToggleConversations,
   onToggleUserPanel,
 }: WorkbenchSidebarProps) {
+  const openSearchResult = (result: SearchResult) => {
+    if (result.kind === "project") {
+      const project = projects.find((item) => item.id === result.project_id);
+      if (project) onSwitchProject(project);
+      return;
+    }
+    if (result.conversation_id) onOpenConversation(result.conversation_id);
+  };
+
   return (
     <aside className={`${styles.sidebar} sidebar`}>
       <div className="sidebar-top">
@@ -129,12 +160,19 @@ export function WorkbenchSidebar({
             <input value={searchQuery} onChange={(event) => onSearchQueryChange(event.target.value)} placeholder="搜索项目、历史对话" />
           </div>
         )}
+        {!collapsed && searchQuery.trim() && (
+          <div className="search-filters" role="group" aria-label="搜索类型">
+            {searchKindOptions.map((option) => (
+              <button key={option.value} type="button" className={searchKind === option.value ? "active" : ""} aria-pressed={searchKind === option.value} onClick={() => onSearchKindChange(option.value)}>{option.label}</button>
+            ))}
+          </div>
+        )}
         {!collapsed && searchResults.length > 0 && (
           <div className="search-results">
             {searchResults.map((result) => (
-              <button key={`${result.kind}-${result.id}`} onClick={() => result.conversation_id && onOpenConversation(result.conversation_id)}>
-                <strong>{result.title}</strong>
-                <span>{result.excerpt}</span>
+              <button key={`${result.kind}-${result.id}`} onClick={() => openSearchResult(result)}>
+                <div className="search-result-title"><em>{searchKindLabels[result.kind]}</em><strong>{highlightedText(result.title, searchQuery)}</strong></div>
+                <span>{highlightedText(result.excerpt, searchQuery)}</span>
               </button>
             ))}
           </div>

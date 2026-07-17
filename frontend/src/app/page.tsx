@@ -42,6 +42,7 @@ import type {
   BidWorkflowStreamEvent,
   ChatStreamEvent,
   SearchResult,
+  SearchResultKind,
   WebSearchConfig,
   WorkbenchConversation,
   WorkbenchMessage,
@@ -101,6 +102,7 @@ export default function Home() {
   const [currentProfileId, setCurrentProfileId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  const [searchKind, setSearchKind] = useState<SearchResultKind | "all">("all");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const { isStreaming, send: sendChatStream, abort: abortChatStream } = useChatStream();
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
@@ -196,7 +198,7 @@ export default function Home() {
   }, [initializeAuth]);
 
   useEffect(() => {
-    if (authMode === "ready" || currentProjectId || projects.length === 0) return;
+    if (authMode !== "ready" || currentProjectId || projects.length === 0) return;
     const initialProject = projects.find((project) => !project.workspace_path && project.title === "默认项目") ?? projects.find((project) => !project.workspace_path) ?? projects[0];
     setCurrentProjectId(initialProject.id);
   }, [authMode, currentProjectId, projects]);
@@ -270,13 +272,13 @@ export default function Home() {
     }
     const timer = window.setTimeout(async () => {
       try {
-        setSearchResults(await searchWorkbench(trimmed));
+        setSearchResults(await searchWorkbench(trimmed, searchKind === "all" ? undefined : searchKind));
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : String(caught));
       }
     }, 240);
     return () => window.clearTimeout(timer);
-  }, [searchQuery]);
+  }, [searchKind, searchQuery]);
 
   useEffect(() => {
     if (!polledBidWorkflows) return;
@@ -840,6 +842,7 @@ export default function Home() {
           projectPreviewConversations={projectPreviewConversations}
           historyConversations={sidebarHistoryConversations}
           searchQuery={searchQuery}
+          searchKind={searchKind}
           searchResults={searchResults}
           projectsOpen={projectsOpen}
           projectConversationsOpen={projectConversationsOpen}
@@ -851,6 +854,7 @@ export default function Home() {
           onFocusSearch={() => setSearchQuery((current) => current || " ")}
           onOpenConfig={openConfigPanel}
           onSearchQueryChange={setSearchQuery}
+          onSearchKindChange={setSearchKind}
           onToggleProjects={() => setProjectsOpen((current) => !current)}
           onChooseWorkspace={chooseWorkspaceDirectory}
           onSwitchProject={switchProject}

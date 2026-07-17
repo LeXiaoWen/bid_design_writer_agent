@@ -26,6 +26,7 @@ from .services.bid_jobs import BidJobWorker
 from .services.bid_streams import bid_workflow_streams
 from .services.config import API_PRESETS
 from .services.credentials import CredentialStoreUnavailable
+from .services.document_chunks import DOCUMENT_CHUNK_CHARACTER_BUDGET, split_document_text
 from .services.document_parser import parse_document
 from .services.llm import run_agent
 from .services.logging_config import configure_logging
@@ -47,6 +48,7 @@ load_dotenv()
 configure_logging()
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+CHUNK_NOTE_CHARACTER_LIMIT = 4_000
 
 
 def get_cors_origins() -> list[str]:
@@ -142,12 +144,6 @@ async def read_upload_with_limit(file: UploadFile, max_bytes: int | None = None)
     return b"".join(chunks)
 
 
-def truncate_text(text: str, max_chars: int = 120_000) -> str:
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars] + "\n\n[文本过长，已截断。请优先基于已有内容提取，并提示用户可补充缺失页。]"
-
-
 def api_config_from_profile(user_id: str, provider_profile_id: str) -> ApiConfig:
     profile = workbench_store.get_provider_profile(user_id, provider_profile_id)
     api_key = workbench_store.resolve_api_key(user_id, provider_profile_id)
@@ -220,13 +216,13 @@ def workflow_is_cancelled(user_id: str, workflow_id: str) -> bool:
     return workbench_store.get_bid_workflow(user_id, workflow_id).status == BidWorkflowStatus.CANCELLED
 
 
-def bid_model_progress(job_id: str, stage: str):
+def bid_model_progress(job_id: str, stage: str, initial_progress: int = 15):
     received_chars = 0
     reported_chars = 0
     lock = threading.Lock()
     response_started = threading.Event()
     stop_waiting = threading.Event()
-    workbench_store.update_bid_job(job_id, progress=15, message="正在建立模型连接。")
+    workbench_store.update_bid_job(job_id, progress=initial_progress, message="正在建立模型连接。")
 
     def report(delta: str) -> None:
         nonlocal received_chars, reported_chars
@@ -236,7 +232,7 @@ def bid_model_progress(job_id: str, stage: str):
             if reported_chars and received_chars < reported_chars + 200:
                 return
             reported_chars = received_chars
-            progress = min(90, 20 + received_chars // 100)
+            progress = min(90, initial_progress + 5 + received_chars // 100)
             workbench_store.update_bid_job(
                 job_id,
                 progress=progress,
@@ -254,7 +250,7 @@ def bid_model_progress(job_id: str, stage: str):
                     return
                 workbench_store.update_bid_job(
                     job_id,
-                    progress=min(19, 15 + elapsed // 5),
+                    progress=min(initial_progress + 4, initial_progress + elapsed // 5),
                     message=f"正在等待{stage}模型响应（已等待 {elapsed} 秒）。",
                 )
 
@@ -276,6 +272,34 @@ def bid_usage(instructions: str, prompt: str, output: str = "") -> dict[str, int
     }
 
 
+def compact_chunk_notes(user_id: str, workflow_id: str, api_config: ApiConfig, notes: list[str], job_id: str | None) -> str | None:
+    while len(_numbered_chunk_notes(notes)) > DOCUMENT_CHUNK_CHARACTER_BUDGET:
+        groups = split_document_text(_numbered_chunk_notes(notes))
+        condensed_notes = []
+        for index, group in enumerate(groups, start=1):
+            if workflow_is_cancelled(user_id, workflow_id):
+                return None
+            if job_id:
+                progress = 70 + (index - 1) * 4 // len(groups)
+                workbench_store.update_bid_job(job_id, progress=progress, message=f"正在压缩第 {index}/{len(groups)} 组分块笔记。")
+            condensed_notes.append(
+                run_agent(
+                    api_config,
+                    """你负责合并招标文件的分块事实笔记。去除重复，但必须保留项目名称、范围、时间、金额、评分、成果、格式、资格、风险和否定条件；不要补全信息，控制在 4,000 字以内。""",
+                    f"请合并以下分块事实笔记：\n\n{group}",
+                )[:CHUNK_NOTE_CHARACTER_LIMIT]
+            )
+        notes = condensed_notes
+    return _numbered_chunk_notes(notes)
+
+
+def _numbered_chunk_notes(notes: list[str]) -> str:
+    return "\n\n".join(
+        f"--- 分块 {index} 提取笔记 ---\n{note}"
+        for index, note in enumerate(notes, start=1)
+    )
+
+
 def run_bid_agent_stream(
     user_id: str,
     workflow_id: str,
@@ -286,10 +310,11 @@ def run_bid_agent_stream(
     api_config: ApiConfig,
     instructions: str,
     prompt: str,
+    initial_progress: int = 15,
 ) -> str:
     chunks: list[str] = []
     published_length = 0
-    report_progress, stop_progress = bid_model_progress(job_id, stage)
+    report_progress, stop_progress = bid_model_progress(job_id, stage, initial_progress)
 
     def on_delta(delta: str) -> None:
         nonlocal published_length
@@ -326,21 +351,59 @@ def run_bid_extraction_task(user_id: str, workflow_id: str, job_id: str | None =
         if workflow.status == BidWorkflowStatus.CANCELLED:
             return
         api_config = api_config_from_profile(user_id, workflow.provider_profile_id or "")
+        instructions = build_stage1_instructions()
+        chunks = split_document_text(workflow.file_text)
+        initial_progress = 15
+        if len(chunks) == 1:
+            source_material = workflow.file_text
+        else:
+            partial_notes = []
+            for index, chunk in enumerate(chunks, start=1):
+                if workflow_is_cancelled(user_id, workflow_id):
+                    return
+                if job_id:
+                    progress = 15 + (index - 1) * 60 // len(chunks)
+                    workbench_store.update_bid_job(job_id, progress=progress, message=f"正在解析招标文件第 {index}/{len(chunks)} 块。")
+                partial_notes.append(
+                    run_agent(
+                        api_config,
+                        """你负责提炼招标文件分块中的可核验事实。仅依据当前分块，紧凑记录项目名称、范围、时间、金额、评分、成果、格式、资格和风险要求；保留原始数值与否定条件。不要编写方案，不要补全缺失信息，控制在 4,000 字以内。""",
+                        f"""招标文件：{workflow.file_name}
+这是第 {index}/{len(chunks)} 个分块。请提炼该分块的事实笔记：
+
+{chunk}""",
+                    )[:CHUNK_NOTE_CHARACTER_LIMIT]
+                )
+            source_material = compact_chunk_notes(user_id, workflow_id, api_config, partial_notes, job_id)
+            if source_material is None:
+                return
+            initial_progress = 75
+
         prompt = f"""
-请执行阶段一：从以下招标文件文本中提取四类关键信息，并按 Skill 要求输出。
+请执行阶段一：从以下招标文件文本或分块事实笔记中提取四类关键信息，并按 Skill 要求输出。
 
 文件名：{workflow.file_name}
 提取时间：{datetime.now().strftime("%Y-%m-%d %H:%M")}
 
-招标文件文本：
-{truncate_text(workflow.file_text)}
+招标文件内容：
+{source_material}
 """
-        instructions = build_stage1_instructions()
         if job_id:
             stream_usage = bid_usage(instructions, prompt)
             assistant_message = workbench_store.add_message(user_id, workflow.conversation_id, "assistant", "", status="streaming", model=api_config.model, usage=stream_usage)
             bid_workflow_streams.publish(workflow_id, "message_start", bid_message_start_payload(assistant_message))
-            result = run_bid_agent_stream(user_id, workflow_id, workflow.conversation_id, assistant_message.id, job_id, "阶段一", api_config, instructions, prompt)
+            result = run_bid_agent_stream(
+                user_id,
+                workflow_id,
+                workflow.conversation_id,
+                assistant_message.id,
+                job_id,
+                "阶段一",
+                api_config,
+                instructions,
+                prompt,
+                initial_progress,
+            )
         else:
             result = run_agent(api_config, instructions, prompt)
         if workflow_is_cancelled(user_id, workflow_id):

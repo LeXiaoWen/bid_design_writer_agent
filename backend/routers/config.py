@@ -49,8 +49,10 @@ def delete_provider_profile(profile_id: str, request: Request):
 
 
 @router.get("/api/v1/search")
-def search_workbench(request: Request, q: str = Query(default="")):
-    return workbench_store.search(current_user(request).id, q)
+def search_workbench(request: Request, q: str = Query(default=""), kind: str = Query(default="")):
+    if kind and kind not in {"project", "conversation", "message"}:
+        raise HTTPException(status_code=422, detail="kind 只能是 project、conversation 或 message。")
+    return workbench_store.search(current_user(request).id, q, kind or None)
 
 
 @router.get("/api/v1/web-search-config", response_model=WebSearchConfig)

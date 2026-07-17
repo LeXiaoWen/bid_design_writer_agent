@@ -1310,34 +1310,42 @@ class WorkbenchStore:
     def _tavily_credential_key(self, user_id: str) -> str:
         return f"tavily:{user_id}"
 
-    def search(self, user_id: str, query: str) -> list[SearchResult]:
+    def search(self, user_id: str, query: str, kind: str | None = None) -> list[SearchResult]:
         trimmed = query.strip()
         if not trimmed:
             return []
+        normalized_kind = kind.strip() if kind else ""
+        kind_clause = " AND kind = ?" if normalized_kind else ""
+        search_params = [trimmed, user_id]
+        if normalized_kind:
+            search_params.append(normalized_kind)
         try:
             rows = self._execute(
-                """
+                f"""
                 SELECT kind, source_id, project_id, conversation_id, title, snippet(search_index, 5, '', '', '...', 12) AS excerpt
                 FROM search_index
-                WHERE search_index MATCH ? AND owner_user_id = ?
+                WHERE search_index MATCH ? AND owner_user_id = ?{kind_clause}
                 ORDER BY rank
                 LIMIT 30
                 """,
-                (trimmed, user_id),
+                search_params,
             ).fetchall()
         except sqlite3.OperationalError:
             rows = []
         if not rows:
             like_query = f"%{trimmed}%"
+            fallback_params = [user_id, like_query, like_query]
+            if normalized_kind:
+                fallback_params.append(normalized_kind)
             rows = self._execute(
-                """
+                f"""
                 SELECT kind, source_id, project_id, conversation_id, title, content AS excerpt
                 FROM search_index
-                WHERE owner_user_id = ? AND (title LIKE ? OR content LIKE ?)
+                WHERE owner_user_id = ? AND (title LIKE ? OR content LIKE ?){kind_clause}
                 ORDER BY title
                 LIMIT 30
                 """,
-                (user_id, like_query, like_query),
+                fallback_params,
             ).fetchall()
         return [
             SearchResult(

@@ -3,9 +3,16 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from logging.handlers import RotatingFileHandler
 
 from .workbench_store import data_dir
+
+
+def redact_log_text(text: str) -> str:
+    redacted = re.sub(r"(?i)(api[_-]?key|token|password|secret)\s*[:=]\s*[^\s]+", r"\1=[已脱敏]", text)
+    redacted = re.sub(r"Bearer\s+[A-Za-z0-9._-]{12,}", "Bearer [已脱敏]", redacted)
+    return re.sub(r"sk-[A-Za-z0-9_-]{12,}", "[已脱敏 API key]", redacted)
 
 
 class JsonFormatter(logging.Formatter):
@@ -14,13 +21,13 @@ class JsonFormatter(logging.Formatter):
             "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": redact_log_text(record.getMessage()),
         }
         for key in ("workflow_id", "kind", "user_id"):
             if hasattr(record, key):
                 payload[key] = getattr(record, key)
         if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
+            payload["exception"] = redact_log_text(self.formatException(record.exc_info))
         return json.dumps(payload, ensure_ascii=False)
 
 
