@@ -383,19 +383,32 @@ class WorkbenchStore:
             return
 
         self._write_recovery_backup(user_id, password, secrets_to_migrate)
-        try:
+        vault_key = self._credential_vault_key(user_id)
+        credentials = [(f"provider:{user_id}:{row['id']}", row["api_key"]) for row in profiles]
+        if tavily_key:
+            credentials.append((self._tavily_credential_key(user_id), tavily_key))
+        now = utc_now()
+        encrypted_credentials = []
+        for credential_key, value in credentials:
+            nonce = os.urandom(12)
+            ciphertext = AESGCM(vault_key).encrypt(nonce, value.encode("utf-8"), self._credential_aad(user_id, credential_key))
+            encrypted_credentials.append((credential_key, nonce, ciphertext))
+        with self._lock, self._connection:
+            for credential_key, nonce, ciphertext in encrypted_credentials:
+                self._execute(
+                    """
+                    INSERT INTO encrypted_credentials (user_id, credential_key, nonce, ciphertext, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id, credential_key) DO UPDATE SET nonce = excluded.nonce, ciphertext = excluded.ciphertext, updated_at = excluded.updated_at
+                    """,
+                    (user_id, credential_key, nonce, ciphertext, now, now),
+                )
             for row in profiles:
                 key = f"provider:{user_id}:{row['id']}"
-                self.set_credential(user_id, key, row["api_key"])
                 self._execute("UPDATE provider_profiles SET credential_key = ?, has_key = 1 WHERE id = ?", (key, row["id"]))
-            if tavily_key:
-                self.set_credential(user_id, self._tavily_credential_key(user_id), tavily_key)
-        finally:
-            # The runtime must never continue consuming plaintext data after v0.2.
-            with self._lock, self._connection:
-                self._execute("UPDATE provider_profiles SET api_key = NULL WHERE owner_user_id = ?", (user_id,))
-                self.set_user_setting(user_id, "web_search.api_key", "")
-                self.set_user_setting(user_id, "web_search.has_key", "1" if tavily_key else "0")
+            self._execute("UPDATE provider_profiles SET api_key = NULL WHERE owner_user_id = ?", (user_id,))
+            self.set_user_setting(user_id, "web_search.api_key", "")
+            self.set_user_setting(user_id, "web_search.has_key", "1" if tavily_key else "0")
 
     def _write_recovery_backup(self, user_id: str, password: str, values: dict[str, str]) -> Path:
         salt = os.urandom(16)
@@ -499,7 +512,13 @@ class WorkbenchStore:
         with self._lock, self._connection:
             self._execute("DELETE FROM encrypted_credentials WHERE user_id = ? AND credential_key = ?", (user_id, credential_key))
 
-    def rotate_credential_vault(self, user_id: str, current_password: str, new_password: str) -> None:
+    def change_user_password_and_rotate_credential_vault(
+        self,
+        user_id: str,
+        current_password: str,
+        new_password: str,
+        new_password_hash: str,
+    ) -> None:
         old_key = self._credential_vault_key(user_id)
         row = self._execute("SELECT salt FROM credential_vaults WHERE user_id = ?", (user_id,)).fetchone()
         if not row:
@@ -528,6 +547,8 @@ class WorkbenchStore:
                     "UPDATE encrypted_credentials SET nonce = ?, ciphertext = ?, updated_at = ? WHERE user_id = ? AND credential_key = ?",
                     (nonce, ciphertext, now, user_id, name),
                 )
+            self._execute("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?", (new_password_hash, now, user_id))
+            self._execute("UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL", (now, user_id))
         self._vault_keys[user_id] = new_key
 
     def sync_credential_status(self, user_id: str) -> None:

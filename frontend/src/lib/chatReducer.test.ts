@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { applyChatStreamEvent } from "./chatReducer";
-import type { ChatStreamEvent, WorkbenchMessage } from "./types";
+import { applyBidWorkflowStreamEvent, applyChatStreamEvent } from "./chatReducer";
+import type { BidWorkflowStreamEvent, ChatStreamEvent, WorkbenchMessage } from "./types";
 
 const now = "2026-07-06T00:00:00.000Z";
 
@@ -117,4 +117,15 @@ test("error marks the assistant message and keeps fallback content", () => {
   assert.equal(next[0].status, "error");
   assert.equal(next[0].content, "partial");
   assert.equal(next[0].error, "rate limited");
+});
+
+test("workflow delta ignores replayed content and waits for missing offsets", () => {
+  const event: BidWorkflowStreamEvent = {
+    event: "delta",
+    data: { conversation_id: "conversation-1", message_id: "assistant-1", delta: "正文", offset: 2 },
+  };
+
+  assert.equal(applyBidWorkflowStreamEvent([assistantMessage({ content: "方案" })], event, now)[0].content, "方案正文");
+  assert.equal(applyBidWorkflowStreamEvent([assistantMessage({ content: "方案正文" })], event, now)[0].content, "方案正文");
+  assert.equal(applyBidWorkflowStreamEvent([assistantMessage({ content: "方" })], event, now)[0].content, "方");
 });

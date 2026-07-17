@@ -33,8 +33,8 @@ export function AuthPanel({ mode, backendReady, error, onModeChange, onSubmit }:
           confirmPassword: z.string(),
         })
         .superRefine((values, context) => {
-          if (mode === "register" && values.password.length < 6) {
-            context.addIssue({ code: z.ZodIssueCode.too_small, minimum: 6, type: "string", inclusive: true, path: ["password"], message: "密码至少 6 位。" });
+          if (mode === "register" && values.password.length < 12) {
+            context.addIssue({ code: z.ZodIssueCode.too_small, minimum: 12, type: "string", inclusive: true, path: ["password"], message: "密码至少 12 位。" });
           }
           if (mode === "register" && values.password !== values.confirmPassword) {
             context.addIssue({ code: z.ZodIssueCode.custom, path: ["confirmPassword"], message: "两次输入的密码不一致。" });

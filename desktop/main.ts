@@ -11,6 +11,20 @@ const APP_AUTH_SECRET = process.env.APP_AUTH_SECRET ?? randomBytes(32).toString(
 const BACKEND_READY_TIMEOUT_MS = 30_000;
 const BACKEND_READY_INTERVAL_MS = 300;
 const BACKEND_SHUTDOWN_GRACE_MS = 1_500;
+const PACKAGED_FRONTEND_CSP = [
+  "default-src 'self'",
+  "base-uri 'none'",
+  "object-src 'none'",
+  "frame-src 'none'",
+  "script-src 'self' 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob: https:",
+  "font-src 'self' data:",
+  "connect-src 'self' http://127.0.0.1:* http://localhost:*",
+  "media-src 'self' blob:",
+  "worker-src 'self' blob:",
+  "form-action 'self'",
+].join("; ");
 let backendProcess: ChildProcessWithoutNullStreams | null = null;
 let backendStartPromise: Promise<void> | null = null;
 let mainWindow: BrowserWindow | null = null;
@@ -136,6 +150,7 @@ function startBackend(): Promise<void> {
     ...loadEnvFiles(),
     ...process.env,
     APP_AUTH_SECRET,
+    AGENT_HOST: "127.0.0.1",
     AGENT_PORT: "0",
     AI_WORKBENCH_DATA_DIR: dataDir,
     FRONTEND_ORIGINS: process.env.FRONTEND_ORIGINS ?? "http://localhost:3000,http://127.0.0.1:3000,app://frontend,null",
@@ -221,7 +236,7 @@ function registerPackagedFrontendProtocol(): void {
   if (!app.isPackaged) return;
 
   const frontendRoot = path.join(process.resourcesPath, "frontend");
-  protocol.handle("app", (request) => {
+  protocol.handle("app", async (request) => {
     const url = new URL(request.url);
     if (url.hostname !== "frontend") {
       return new Response("Not found", { status: 404 });
@@ -236,7 +251,10 @@ function registerPackagedFrontendProtocol(): void {
       return new Response("Forbidden", { status: 403 });
     }
 
-    return net.fetch(pathToFileURL(filePath).toString());
+    const response = await net.fetch(pathToFileURL(filePath).toString());
+    const headers = new Headers(response.headers);
+    headers.set("Content-Security-Policy", PACKAGED_FRONTEND_CSP);
+    return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
   });
 }
 
@@ -261,6 +279,7 @@ async function createWindow(): Promise<void> {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
     },
   });
 

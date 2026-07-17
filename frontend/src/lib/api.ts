@@ -171,6 +171,14 @@ export function changePassword(input: { current_password: string; new_password: 
   });
 }
 
+export function restoreCredentials(input: { password: string }): Promise<{ ok: boolean; restored: number }> {
+  return request<{ ok: boolean; restored: number }>("/api/v1/auth/restore-credentials", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
 export function listProjects(): Promise<WorkbenchProject[]> {
   return request<WorkbenchProject[]>("/api/v1/projects");
 }

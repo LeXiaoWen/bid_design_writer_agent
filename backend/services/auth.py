@@ -104,7 +104,7 @@ def logout_token(token: str | None) -> None:
     if token:
         user = workbench_store.get_auth_session_user(_hash_token(token), utc_now())
         workbench_store.revoke_auth_session(_hash_token(token))
-        if user and not workbench_store.has_active_auth_sessions(user.id, utc_now()):
+        if user:
             workbench_store.lock_credential_vault(user.id)
 
 
@@ -118,6 +118,10 @@ def change_password(user: AuthUser, current_password: str, new_password: str) ->
         verified = False
     if not verified:
         raise ValueError("当前密码错误。")
-    workbench_store.rotate_credential_vault(user.id, current_password, new_password)
-    workbench_store.update_user_password_hash(user.id, _hasher.hash(new_password))
+    workbench_store.change_user_password_and_rotate_credential_vault(
+        user.id,
+        current_password,
+        new_password,
+        _hasher.hash(new_password),
+    )
     workbench_store.lock_credential_vault(user.id)

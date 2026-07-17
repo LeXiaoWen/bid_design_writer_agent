@@ -219,6 +219,15 @@ export type ChatStreamEvent =
 export type BidWorkflowStreamEvent =
   | Extract<ChatStreamEvent, { event: "message_start" | "message_done" }>
   | {
+      event: "delta";
+      data: {
+        conversation_id: string;
+        message_id: string;
+        delta: string;
+        offset: number;
+      };
+    }
+  | {
       event: "message_update";
       data: {
         conversation_id: string;

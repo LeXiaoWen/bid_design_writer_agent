@@ -37,6 +37,9 @@ export function useConfiguration(enabled: boolean) {
     mutationFn: updateWebSearchConfig,
     onSuccess: (config) => queryClient.setQueryData(configurationQueryKeys.webSearch, config),
   });
+  const refresh = useCallback(async () => {
+    await Promise.all([profilesQuery.refetch(), webSearchQuery.refetch()]);
+  }, [profilesQuery, webSearchQuery]);
   const clear = useCallback(() => queryClient.removeQueries({ queryKey: ["configuration"] }), [queryClient]);
 
   return {
@@ -46,6 +49,7 @@ export function useConfiguration(enabled: boolean) {
     createProfile: (input: ProviderProfileInput) => createProfileMutation.mutateAsync(input),
     updateProfile: (profileId: string, input: ProviderProfileUpdate) => updateProfileMutation.mutateAsync({ profileId, input }),
     updateWebSearch: (input: WebSearchInput) => updateWebSearchMutation.mutateAsync(input),
+    refresh,
     clear,
   };
 }

@@ -22,6 +22,7 @@ import {
   generateBidWorkflow,
   getBidWorkflow,
   listBidWorkflows,
+  restoreCredentials,
   searchWorkbench,
   streamBidWorkflow,
 } from "@/lib/api";
@@ -48,7 +49,7 @@ import type {
   WorkbenchMessage,
   WorkbenchProject,
 } from "@/lib/types";
-import { applyChatStreamEvent } from "@/lib/chatReducer";
+import { applyBidWorkflowStreamEvent, applyChatStreamEvent } from "@/lib/chatReducer";
 
 const providerPresets: ProviderProfileDraft[] = [
   { provider: "OpenAI", display_name: "OpenAI", base_url: "https://api.openai.com/v1", model: "gpt-4o" },
@@ -64,7 +65,7 @@ const PROJECT_PREVIEW_CONVERSATION_LIMIT = 6;
 const passwordChangeSchema = z
   .object({
     currentPassword: z.string().min(1, "请输入当前密码。"),
-    newPassword: z.string().min(6, "新密码至少 6 位。"),
+    newPassword: z.string().min(12, "新密码至少 12 位。"),
     confirmPassword: z.string(),
   })
   .refine((values) => values.newPassword === values.confirmPassword, {
@@ -140,6 +141,7 @@ export default function Home() {
     createProfile,
     updateProfile,
     updateWebSearch,
+    refresh: refreshConfiguration,
     clear: clearConfiguration,
   } = useConfiguration(authMode === "ready");
   const passwordChangeForm = useForm<PasswordChangeValues>({
@@ -305,13 +307,7 @@ export default function Home() {
     if (!activeBidWorkflow || !["extracting", "generating"].includes(activeBidWorkflow.status)) return;
     const controller = new AbortController();
     void streamBidWorkflow(activeBidWorkflow.id, (event: BidWorkflowStreamEvent) => {
-      if (event.event === "message_start" || event.event === "message_done") {
-        updateMessages(event.data.conversation_id, (current) => applyChatStreamEvent(current, event));
-        return;
-      }
-      updateMessages(event.data.conversation_id, (current) => current.map((message) => (
-        message.id === event.data.message_id ? { ...message, content: event.data.content, status: "streaming", updated_at: new Date().toISOString() } : message
-      )));
+      updateMessages(event.data.conversation_id, (current) => applyBidWorkflowStreamEvent(current, event));
     }, controller.signal).catch((caught) => {
       if (!controller.signal.aborted) setError(caught instanceof Error ? caught.message : String(caught));
     });
@@ -764,6 +760,22 @@ export default function Home() {
     }
   }
 
+  async function restoreLegacyCredentials() {
+    const password = passwordChangeForm.getValues("currentPassword");
+    if (!password) {
+      passwordChangeForm.setError("currentPassword", { message: "请输入当前密码后再恢复。" });
+      return;
+    }
+    passwordChangeForm.clearErrors("root");
+    try {
+      const { restored } = await restoreCredentials({ password });
+      await refreshConfiguration();
+      toast.success(restored ? `已恢复 ${restored} 项旧密钥。` : "未找到可恢复的旧密钥。");
+    } catch (caught) {
+      passwordChangeForm.setError("root", { message: caught instanceof Error ? caught.message : String(caught) });
+    }
+  }
+
   async function logoutUser() {
     await logoutAuthSession();
     setUserPanelOpen(false);
@@ -978,6 +990,7 @@ export default function Home() {
                 </label>
                 {passwordChangeForm.formState.errors.root && <div className="auth-field-error">{passwordChangeForm.formState.errors.root.message}</div>}
                 <button type="submit" disabled={passwordChangeForm.formState.isSubmitting}>{passwordChangeForm.formState.isSubmitting ? "修改中" : "修改密码"}</button>
+                <button type="button" className="user-secondary-action" onClick={restoreLegacyCredentials} disabled={passwordChangeForm.formState.isSubmitting}>恢复旧密钥备份</button>
               </form>
             </div>
             <div className="user-panel-actions">

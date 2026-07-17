@@ -1,12 +1,13 @@
 import json
 import logging
+import sqlite3
 import sys
 
 import pytest
 
 from backend.services.logging_config import JsonFormatter, redact_log_text
 from backend.services.auth import _hash_token, logout_token
-from backend.services.workbench_store import CredentialVaultLocked, WorkbenchStore
+from backend.services.workbench_store import CredentialVaultLocked, WorkbenchStore, utc_now
 
 
 def test_local_credential_vault_encrypts_secrets_and_requires_unlock(tmp_path):
@@ -27,18 +28,84 @@ def test_local_credential_vault_encrypts_secrets_and_requires_unlock(tmp_path):
 
     store.unlock_credential_vault(user.id, "test-password")
     assert store.get_credential(user.id, credential_name) == secret
-    store.rotate_credential_vault(user.id, "test-password", "new-password")
+    store.change_user_password_and_rotate_credential_vault(user.id, "test-password", "new-password", "new-password-hash")
     store.lock_credential_vault(user.id)
     store.unlock_credential_vault(user.id, "new-password")
     assert store.get_credential(user.id, credential_name) == secret
 
 
-def test_logout_locks_the_vault_after_its_last_session(tmp_path, monkeypatch):
+def test_password_change_rolls_back_vault_when_password_hash_update_fails(tmp_path, monkeypatch):
+    store = WorkbenchStore(tmp_path / "password-change.db")
+    user = store.create_user("password-change-user", "old-password-hash")
+    credential_name = f"provider:{user.id}:profile"
+    store.unlock_credential_vault(user.id, "old-password")
+    store.set_credential(user.id, credential_name, "vault-secret-value")
+    before_vault = store._execute("SELECT salt FROM credential_vaults WHERE user_id = ?", (user.id,)).fetchone()
+    before_credential = store._execute(
+        "SELECT nonce, ciphertext FROM encrypted_credentials WHERE user_id = ? AND credential_key = ?",
+        (user.id, credential_name),
+    ).fetchone()
+    original_execute = store._execute
+
+    def fail_password_hash_update(sql, params=()):
+        if "UPDATE users SET password_hash" in sql:
+            raise sqlite3.OperationalError("simulated write failure")
+        return original_execute(sql, params)
+
+    monkeypatch.setattr(store, "_execute", fail_password_hash_update)
+    with pytest.raises(sqlite3.OperationalError, match="simulated write failure"):
+        store.change_user_password_and_rotate_credential_vault(user.id, "old-password", "new-password", "new-password-hash")
+
+    after_vault = original_execute("SELECT salt FROM credential_vaults WHERE user_id = ?", (user.id,)).fetchone()
+    after_credential = original_execute(
+        "SELECT nonce, ciphertext FROM encrypted_credentials WHERE user_id = ? AND credential_key = ?",
+        (user.id, credential_name),
+    ).fetchone()
+    assert bytes(after_vault["salt"]) == bytes(before_vault["salt"])
+    assert bytes(after_credential["nonce"]) == bytes(before_credential["nonce"])
+    assert bytes(after_credential["ciphertext"]) == bytes(before_credential["ciphertext"])
+    assert original_execute("SELECT password_hash FROM users WHERE id = ?", (user.id,)).fetchone()["password_hash"] == "old-password-hash"
+
+
+def test_legacy_secret_migration_keeps_plaintext_when_vault_write_fails(tmp_path, monkeypatch):
+    store = WorkbenchStore(tmp_path / "legacy-secret.db")
+    user = store.create_user("legacy-secret-user", "password-hash")
+    profile_id = "legacy-profile"
+    now = utc_now()
+    with store._lock, store._connection:
+        store._execute(
+            """
+            INSERT INTO provider_profiles (id, owner_user_id, provider, display_name, base_url, model, credential_key, has_key, api_key, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (profile_id, user.id, "OpenAI", "旧配置", "https://api.openai.com/v1", "gpt-4o", "legacy-key", 1, "legacy-secret", now, now),
+        )
+    store.unlock_credential_vault(user.id, "password")
+    original_execute = store._execute
+
+    def fail_credential_insert(sql, params=()):
+        if "INSERT INTO encrypted_credentials" in sql:
+            raise sqlite3.OperationalError("simulated vault write failure")
+        return original_execute(sql, params)
+
+    monkeypatch.setattr(store, "_execute", fail_credential_insert)
+    with pytest.raises(sqlite3.OperationalError, match="simulated vault write failure"):
+        store.migrate_legacy_secrets_on_login(user.id, "password")
+
+    row = original_execute("SELECT api_key, credential_key FROM provider_profiles WHERE id = ?", (profile_id,)).fetchone()
+    assert row["api_key"] == "legacy-secret"
+    assert row["credential_key"] == "legacy-key"
+    assert original_execute("SELECT 1 FROM encrypted_credentials WHERE user_id = ?", (user.id,)).fetchone() is None
+
+
+def test_logout_locks_the_vault_even_when_another_session_remains(tmp_path, monkeypatch):
     store = WorkbenchStore(tmp_path / "logout.db")
     user = store.create_user("logout-user", "password-hash")
     store.unlock_credential_vault(user.id, "password")
     token = "logout-token"
+    stale_token = "stale-token"
     store.create_auth_session(user.id, _hash_token(token), "2099-01-01T00:00:00+00:00")
+    store.create_auth_session(user.id, _hash_token(stale_token), "2099-01-01T00:00:00+00:00")
 
     monkeypatch.setattr("backend.services.auth.workbench_store", store)
     logout_token(token)

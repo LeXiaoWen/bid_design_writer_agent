@@ -309,29 +309,30 @@ def run_bid_agent_stream(
 ) -> str:
     chunks: list[str] = []
     published_length = 0
+    content_length = 0
     report_progress, stop_progress = bid_model_progress(job_id, stage, initial_progress)
 
     def on_delta(delta: str) -> None:
-        nonlocal published_length
+        nonlocal content_length, published_length
         chunks.append(delta)
+        offset = content_length
+        content_length += len(delta.encode("utf-16-le")) // 2
         report_progress(delta)
-        content = "".join(chunks)
         bid_workflow_streams.publish(
             workflow_id,
-            "message_update",
-            {"conversation_id": conversation_id, "message_id": message_id, "content": content},
+            "delta",
+            {"conversation_id": conversation_id, "message_id": message_id, "delta": delta, "offset": offset},
         )
-        if len(content) - published_length < 24:
+        if content_length - published_length < 256:
             return
-        published_length = len(content)
-        workbench_store.update_streaming_message(user_id, message_id, content)
+        published_length = content_length
+        workbench_store.update_streaming_message(user_id, message_id, "".join(chunks))
 
     try:
         result = run_agent(api_config, instructions, prompt, on_delta=on_delta)
         if result and result != "".join(chunks):
             workbench_store.update_streaming_message(user_id, message_id, result)
-            bid_workflow_streams.publish(workflow_id, "message_update", {"conversation_id": conversation_id, "message_id": message_id, "content": result})
-        elif len("".join(chunks)) > published_length:
+        elif content_length > published_length:
             workbench_store.update_streaming_message(user_id, message_id, "".join(chunks))
         return result
     finally:

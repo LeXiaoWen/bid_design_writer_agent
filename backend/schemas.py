@@ -147,7 +147,7 @@ class AuthLoginRequest(BaseModel):
 
 
 class AuthRegisterRequest(AuthLoginRequest):
-    password: str = Field(min_length=6)
+    password: str = Field(min_length=12)
 
 
 class AuthLoginResponse(BaseModel):
@@ -166,7 +166,7 @@ class AuthUser(BaseModel):
 
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(min_length=1)
-    new_password: str = Field(min_length=6)
+    new_password: str = Field(min_length=12)
 
 
 class RestoreCredentialsRequest(BaseModel):

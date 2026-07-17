@@ -15,11 +15,11 @@ os.environ["APP_AUTH_SECRET"] = "test-app-secret"
 os.environ["AI_WORKBENCH_TEST_MODE"] = "1"
 
 from backend.main import app
-from backend.schemas import BidExecutionState, BidWorkflowStatus, ProviderModel
+from backend.schemas import BidExecutionState, BidWorkflowStatus, ProviderModel, WorkbenchConversationCreate, WorkbenchProjectCreate
 from backend.services.behavior_report import REPORT_FILENAME, behavior_report_path, save_behavior_report
 from backend.services.app_version import get_app_version
 from backend.services.bid_jobs import BidJobWorker
-from backend.services.workbench_store import WorkbenchStore, workbench_store
+from backend.services.workbench_store import SCHEMA_VERSION, WorkbenchStore, workbench_store
 
 
 APP_SECRET_HEADERS = {"X-App-Auth-Secret": "test-app-secret"}
@@ -78,6 +78,23 @@ def test_v1_routes_require_app_secret_and_login():
     assert status.status_code == 200
     assert status.json()["registration_allowed"] is True
     assert status.json()["authenticated"] is False
+
+
+def test_auth_rejects_passwords_shorter_than_twelve_characters():
+    response = client.post(
+        "/api/v1/auth/register",
+        headers=APP_SECRET_HEADERS,
+        json={"username": "short-password-user", "password": "short-pass"},
+    )
+
+    assert response.status_code == 422
+
+    response = client.post(
+        "/api/v1/auth/change-password",
+        json={"current_password": "test-password", "new_password": "short-pass"},
+    )
+
+    assert response.status_code == 422
 
 
 def test_auth_error_keeps_cors_headers_for_app_frontend():
@@ -147,6 +164,10 @@ def test_auth_login_logout_and_wrong_password_guard():
     assert logout.status_code == 200
     after_logout = temporary_client.get("/api/v1/me")
     assert after_logout.status_code == 401
+
+    relogin = client.post("/api/v1/auth/login", json={"username": "tester", "password": "test-password"})
+    assert relogin.status_code == 200
+    client.headers["Authorization"] = f"Bearer {relogin.json()['token']}"
 
 
 def test_auth_login_throttles_repeated_failures():
@@ -334,7 +355,7 @@ def test_legacy_database_migrates_existing_data_to_its_only_user(tmp_path):
     assert migrated._execute("SELECT api_key FROM provider_profiles WHERE id = 'legacy-profile'").fetchone()["api_key"] is None
     assert any(item.project_id == "legacy-project" for item in migrated.search("legacy-user", "历史项目"))
     assert migrated.path.with_suffix(".db.pre-multitenant.bak").exists()
-    assert migrated._connection.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert migrated._connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
 def test_web_search_config_does_not_echo_tavily_key():
@@ -834,30 +855,28 @@ def test_recover_bid_job_interrupts_its_streaming_message_without_touching_chat_
     assert workbench_store.get_bid_streaming_message(TEST_USER_ID, workflow_id) is None
 
 
-def test_bid_job_recovery_fails_after_second_interruption():
-    project_id = client.post("/api/v1/projects", json={"title": "任务恢复失败项目"}).json()["id"]
-    conversation_id = client.post(
-        "/api/v1/conversations",
-        json={"project_id": project_id, "title": "任务恢复失败"},
-    ).json()["id"]
-    workflow = workbench_store.create_bid_workflow(
-        TEST_USER_ID,
-        conversation_id=conversation_id,
+def test_bid_job_recovery_fails_after_second_interruption(tmp_path):
+    store = WorkbenchStore(tmp_path / "job-recovery.db")
+    user = store.create_user("job-recovery-user", "password-hash")
+    project = store.create_project(user.id, WorkbenchProjectCreate(title="任务恢复失败项目"))
+    conversation = store.create_conversation(user.id, WorkbenchConversationCreate(project_id=project.id, title="任务恢复失败"))
+    workflow = store.create_bid_workflow(
+        user.id,
+        conversation_id=conversation.id,
         file_name="恢复失败.txt",
         file_text="项目名称：任务恢复失败项目",
     )
-    workbench_store.update_bid_workflow_status(TEST_USER_ID, workflow.id, BidWorkflowStatus.EXTRACTING)
-    workbench_store.enqueue_bid_job(TEST_USER_ID, workflow.id, "extraction")
-    assert workbench_store.claim_next_bid_job() is not None
-    workbench_store.recover_bid_jobs()
-    assert workbench_store.claim_next_bid_job() is not None
+    store.update_bid_workflow_status(user.id, workflow.id, BidWorkflowStatus.EXTRACTING)
+    store.enqueue_bid_job(user.id, workflow.id, "extraction")
+    assert store.claim_next_bid_job() is not None
+    store.recover_bid_jobs()
+    assert store.claim_next_bid_job() is not None
+    store.recover_bid_jobs()
 
-    workbench_store.recover_bid_jobs()
-
-    execution = workbench_store.get_bid_execution(workflow.id)
+    execution = store.get_bid_execution(workflow.id)
     assert execution is not None
     assert execution.state == BidExecutionState.FAILED
-    assert workbench_store.get_bid_workflow(TEST_USER_ID, workflow.id).status == BidWorkflowStatus.FAILED
+    assert store.get_bid_workflow(user.id, workflow.id).status == BidWorkflowStatus.FAILED
 
 
 def test_chunked_bid_extraction_keeps_tail_requirements(monkeypatch):
