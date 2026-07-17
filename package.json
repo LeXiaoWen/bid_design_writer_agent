@@ -1,6 +1,6 @@
 {
   "name": "bid-design-writer-desktop",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "建筑设计标书方案助手桌面应用",
   "author": "AI Workbench",
   "private": true,
@@ -30,7 +30,7 @@
     "install:agent": "node scripts/setup-agent.js",
     "typecheck": "npm --prefix frontend run typecheck && npm run build:desktop",
     "test:backend": "PYTHONPATH=. pytest -p no:capture backend/tests",
-    "test:frontend": "npm --prefix frontend run test:unit"
+    "test:frontend": "npm --prefix frontend run test:unit && npm --prefix frontend run test:e2e"
   },
   "devDependencies": {
     "@types/node": "^20",

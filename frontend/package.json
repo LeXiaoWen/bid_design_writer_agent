@@ -1,13 +1,14 @@
 {
   "name": "bid-design-writer-frontend",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
   "scripts": {
     "dev": "next dev --hostname 127.0.0.1 --port 3000",
     "build": "next build",
     "start": "next start --hostname 127.0.0.1 --port 3000",
     "typecheck": "tsc --noEmit",
-    "test:unit": "tsc -p tsconfig.test.json && node --test .test-dist/lib/*.test.js"
+    "test:unit": "tsc -p tsconfig.test.json && node --test .test-dist/lib/*.test.js",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
@@ -35,6 +36,7 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@playwright/test": "^1.58.0",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",

@@ -329,7 +329,7 @@ def test_provider_models_can_be_listed(monkeypatch):
             ProviderModel(id="deepseek-reasoner", name="deepseek-reasoner"),
         ]
 
-    monkeypatch.setattr("backend.main.fetch_provider_models", fake_fetch)
+    monkeypatch.setattr("backend.routers.config.fetch_provider_models", fake_fetch)
 
     response = client.get(f"/api/v1/provider-profiles/{profile_id}/models")
     assert response.status_code == 200

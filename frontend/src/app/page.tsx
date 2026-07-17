@@ -3,8 +3,11 @@
 import { X } from "lucide-react";
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
+import { zodResolver } from "@hookform/resolvers/zod";
 import { Panel, PanelGroup, PanelResizeHandle, type ImperativePanelHandle } from "react-resizable-panels";
+import { useForm } from "react-hook-form";
 import { toast } from "sonner";
+import { z } from "zod";
 
 import {
   changePassword,
@@ -13,24 +16,13 @@ import {
   confirmBidWorkflow,
   createConversation,
   createBidWorkflow,
-  createProject,
-  createProviderProfile,
-  deleteConversation,
-  deleteProject,
   downloadBidArtifact,
   downloadBidZip,
   extractBidWorkflow,
   generateBidWorkflow,
   getBidWorkflow,
-  getWebSearchConfig,
-  listConversations,
   listBidWorkflows,
-  listMessages,
-  listProjects,
-  listProviderProfiles,
   searchWorkbench,
-  updateProviderProfile,
-  updateWebSearchConfig,
 } from "@/lib/api";
 import { ChatWorkspace } from "@/components/ChatWorkspace";
 import { ConfigDialog, type ProviderProfileDraft, type ProviderProfileValues, type WebSearchValues } from "@/components/ConfigDialog";
@@ -41,11 +33,12 @@ import { WorkbenchSidebar } from "@/components/WorkbenchSidebar";
 import { useAuth } from "@/hooks/useAuth";
 import { useBidWorkflow } from "@/hooks/useBidWorkflow";
 import { useChatStream } from "@/hooks/useChatStream";
+import { useConfiguration } from "@/hooks/useConfiguration";
 import { useProviderModels } from "@/hooks/useProviderModels";
+import { useWorkbenchData } from "@/hooks/useWorkbenchData";
 import type {
   BidWorkflow,
   ChatStreamEvent,
-  ProviderProfile,
   SearchResult,
   WebSearchConfig,
   WorkbenchConversation,
@@ -64,6 +57,19 @@ const providerPresets: ProviderProfileDraft[] = [
 ];
 
 const PROJECT_PREVIEW_CONVERSATION_LIMIT = 6;
+
+const passwordChangeSchema = z
+  .object({
+    currentPassword: z.string().min(1, "请输入当前密码。"),
+    newPassword: z.string().min(6, "新密码至少 6 位。"),
+    confirmPassword: z.string(),
+  })
+  .refine((values) => values.newPassword === values.confirmPassword, {
+    path: ["confirmPassword"],
+    message: "两次输入的新密码不一致。",
+  });
+
+type PasswordChangeValues = z.infer<typeof passwordChangeSchema>;
 
 function localMessage(role: "user" | "assistant", content: string, status: string): WorkbenchMessage {
   const now = new Date().toISOString();
@@ -88,11 +94,6 @@ function stripExtension(value: string): string {
 
 export default function Home() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [projects, setProjects] = useState<WorkbenchProject[]>([]);
-  const [projectConversations, setProjectConversations] = useState<WorkbenchConversation[]>([]);
-  const [recentConversations, setRecentConversations] = useState<WorkbenchConversation[]>([]);
-  const [messages, setMessages] = useState<WorkbenchMessage[]>([]);
-  const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [currentProfileId, setCurrentProfileId] = useState<string | null>(null);
@@ -113,12 +114,38 @@ export default function Home() {
     submit: submitAuthRequest,
     logout: logoutAuthSession,
   } = useAuth(setError);
-  const [passwordForm, setPasswordForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "" });
+  const {
+    projects,
+    projectConversations,
+    recentConversations,
+    messages,
+    refreshProjects,
+    refreshConversations,
+    refreshMessages,
+    updateMessages,
+    clear: clearWorkbenchData,
+    createProject: createProjectMutation,
+    deleteProject: deleteProjectMutation,
+    createConversation: createConversationMutation,
+    deleteConversation: deleteConversationMutation,
+  } = useWorkbenchData({ enabled: authMode === "ready", projectId: currentProjectId, conversationId: currentConversationId });
+  const {
+    profiles,
+    webSearchConfig,
+    error: configurationError,
+    createProfile,
+    updateProfile,
+    updateWebSearch,
+    clear: clearConfiguration,
+  } = useConfiguration(authMode === "ready");
+  const passwordChangeForm = useForm<PasswordChangeValues>({
+    resolver: zodResolver(passwordChangeSchema),
+    defaultValues: { currentPassword: "", newPassword: "", confirmPassword: "" },
+  });
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [projectsOpen, setProjectsOpen] = useState(true);
   const [projectConversationsOpen, setProjectConversationsOpen] = useState(true);
   const [conversationsOpen, setConversationsOpen] = useState(true);
-  const [webSearchConfig, setWebSearchConfig] = useState<WebSearchConfig | null>(null);
   const {
     workflow: activeBidWorkflow,
     setWorkflow: setActiveBidWorkflow,
@@ -136,6 +163,7 @@ export default function Home() {
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const sidebarPanelRef = useRef<ImperativePanelHandle>(null);
+  const initialConversationSelectedRef = useRef(false);
 
   const currentProject = useMemo(() => projects.find((project) => project.id === currentProjectId) ?? null, [projects, currentProjectId]);
   const currentConversation = useMemo(
@@ -161,8 +189,36 @@ export default function Home() {
   const { models: providerModels, isLoading: isLoadingModels, error: providerModelsError } = useProviderModels(currentProfileId, modelMenuOpen);
 
   useEffect(() => {
-    void initializeAuth().then((user) => user && bootstrap());
+    void initializeAuth();
   }, [initializeAuth]);
+
+  useEffect(() => {
+    if (authMode === "ready" || currentProjectId || projects.length === 0) return;
+    const initialProject = projects.find((project) => !project.workspace_path && project.title === "默认项目") ?? projects.find((project) => !project.workspace_path) ?? projects[0];
+    setCurrentProjectId(initialProject.id);
+  }, [authMode, currentProjectId, projects]);
+
+  useEffect(() => {
+    if (authMode !== "ready" || currentProfileId || profiles.length === 0) return;
+    setCurrentProfileId(profiles[0].id);
+  }, [authMode, currentProfileId, profiles]);
+
+  useEffect(() => {
+    if (!configurationError) return;
+    setError(configurationError instanceof Error ? configurationError.message : String(configurationError));
+  }, [configurationError]);
+
+  useEffect(() => {
+    if (authMode !== "ready") {
+      initialConversationSelectedRef.current = false;
+      return;
+    }
+    if (initialConversationSelectedRef.current || currentConversationId || !currentProjectId || (projectConversations.length === 0 && recentConversations.length === 0)) return;
+    const firstConversation = recentConversations.find((conversation) => conversation.project_id === currentProjectId) ?? projectConversations[0];
+    if (!firstConversation) return;
+    initialConversationSelectedRef.current = true;
+    void openConversation(firstConversation.id);
+  }, [authMode, currentConversationId, currentProjectId, projectConversations, recentConversations]);
 
   useEffect(() => {
     const handleAuthExpired = () => {
@@ -223,12 +279,12 @@ export default function Home() {
     const workflow = polledWorkflow;
     if (!workflow) return;
     if (workflow.conversation_id === currentConversationId) {
-      void listMessages(workflow.conversation_id).then(setMessages).catch((caught) => setError(caught instanceof Error ? caught.message : String(caught)));
+      void refreshMessages(workflow.conversation_id).catch((caught) => setError(caught instanceof Error ? caught.message : String(caught)));
     }
     if (!["extracting", "generating"].includes(workflow.status)) {
       void refreshConversations(currentProjectId).catch((caught) => setError(caught instanceof Error ? caught.message : String(caught)));
     }
-  }, [polledWorkflow, currentConversationId, currentProjectId]);
+  }, [polledWorkflow, currentConversationId, currentProjectId, refreshMessages, refreshConversations]);
 
   useEffect(() => {
     if (!workflowError) return;
@@ -236,44 +292,9 @@ export default function Home() {
     setIsBidBusy(false);
   }, [workflowError, setIsBidBusy]);
 
-  async function bootstrap() {
-    try {
-      const [nextProjects, nextProfiles, nextWebSearchConfig] = await Promise.all([listProjects(), listProviderProfiles(), getWebSearchConfig()]);
-      setProjects(nextProjects);
-      setProfiles(nextProfiles);
-      setWebSearchConfig(nextWebSearchConfig);
-      const initialProject = nextProjects.find((project) => !project.workspace_path && project.title === "默认项目") ?? nextProjects.find((project) => !project.workspace_path) ?? nextProjects[0];
-      setCurrentProjectId(initialProject?.id ?? null);
-      setCurrentProfileId(nextProfiles[0]?.id ?? null);
-      const [nextProjectConversations, nextRecentConversations] = await Promise.all([
-        initialProject?.id ? listConversations(initialProject.id) : Promise.resolve([]),
-        listConversations(),
-      ]);
-      setProjectConversations(nextProjectConversations);
-      setRecentConversations(nextRecentConversations);
-      const firstConversation = nextRecentConversations.find((conversation) => conversation.project_id === initialProject?.id) ?? nextProjectConversations[0];
-      if (firstConversation) {
-        await openConversation(firstConversation.id);
-      }
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    }
-  }
-
-  async function refreshConversations(projectId = currentProjectId) {
-    const [nextProjectConversations, nextRecentConversations] = await Promise.all([
-      projectId ? listConversations(projectId) : Promise.resolve([]),
-      listConversations(),
-    ]);
-    setProjectConversations(nextProjectConversations);
-    setRecentConversations(nextRecentConversations);
-    return nextProjectConversations;
-  }
-
   async function switchProject(project: WorkbenchProject) {
     setCurrentProjectId(project.id);
     setProjectConversationsOpen(true);
-    setMessages([]);
     setCurrentConversationId(null);
     setActiveBidWorkflow(null);
     await refreshConversations(project.id);
@@ -299,17 +320,15 @@ export default function Home() {
     }
 
     try {
-      const latestProjects = await listProjects();
+      const latestProjects = await refreshProjects();
       const existingProject = latestProjects.find((project) => project.workspace_path === selected.path);
       if (existingProject) {
-        setProjects(latestProjects);
         await switchProject(existingProject);
         return;
       }
 
-      const project = await createProject({ title: selected.name || "未命名项目", workspace_path: selected.path });
-      const nextProjects = await listProjects();
-      setProjects(nextProjects);
+      const project = await createProjectMutation({ title: selected.name || "未命名项目", workspace_path: selected.path });
+      await refreshProjects();
       await switchProject(project);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -323,9 +342,8 @@ export default function Home() {
       void refreshConversations(targetConversation.project_id);
     }
     setCurrentConversationId(conversationId);
-    const [nextMessages, workflows] = await Promise.all([listMessages(conversationId), listBidWorkflows(conversationId)]);
+    const [, workflows] = await Promise.all([refreshMessages(conversationId), listBidWorkflows(conversationId)]);
     const workflow = workflows[0] ?? null;
-    setMessages(nextMessages);
     setActiveBidWorkflow(workflow);
     setError(null);
   }
@@ -333,16 +351,14 @@ export default function Home() {
   async function removeProject(project: WorkbenchProject) {
     if (!window.confirm(`删除项目“${project.title}”？项目下的对话也会被删除。`)) return;
     try {
-      await deleteProject(project.id);
-      const nextProjects = await listProjects();
+      await deleteProjectMutation(project.id);
+      const nextProjects = await refreshProjects();
       const nextDefaultProject = nextProjects.find((item) => !item.workspace_path && item.title === "默认项目") ?? nextProjects.find((item) => !item.workspace_path);
       const nextProjectId = project.id === currentProjectId ? nextDefaultProject?.id ?? nextProjects[0]?.id ?? null : currentProjectId;
-      setProjects(nextProjects);
       setCurrentProjectId(nextProjectId);
       await refreshConversations(nextProjectId);
       if (project.id === currentProjectId) {
         setCurrentConversationId(null);
-        setMessages([]);
         setActiveBidWorkflow(null);
       }
       setError(null);
@@ -354,11 +370,10 @@ export default function Home() {
   async function removeConversation(conversation: WorkbenchConversation) {
     if (!window.confirm(`删除对话“${conversation.title}”？`)) return;
     try {
-      await deleteConversation(conversation.id);
+      await deleteConversationMutation(conversation.id);
       await refreshConversations(currentProjectId);
       if (conversation.id === currentConversationId) {
         setCurrentConversationId(null);
-        setMessages([]);
         setActiveBidWorkflow(null);
       }
       setError(null);
@@ -370,18 +385,17 @@ export default function Home() {
   async function startNewChat() {
     setError(null);
     try {
-      const latestProjects = projects.length > 0 ? projects : await listProjects();
+      const latestProjects = projects.length > 0 ? projects : await refreshProjects();
       const targetProject = latestProjects.find((project) => !project.workspace_path && project.title === "默认项目") ?? latestProjects.find((project) => !project.workspace_path);
-      const conversation = await createConversation({
+      const conversation = await createConversationMutation({
         project_id: targetProject?.id,
         title: "新对话",
         provider_profile_id: currentProfileId ?? undefined,
         model: currentProfile?.model,
       });
-      setProjects(await listProjects());
+      await refreshProjects();
       setCurrentProjectId(conversation.project_id);
       setCurrentConversationId(conversation.id);
-      setMessages([]);
       setActiveBidWorkflow(null);
       setInput("");
       await refreshConversations(conversation.project_id);
@@ -392,7 +406,7 @@ export default function Home() {
 
   async function ensureConversation(text: string) {
     if (currentConversationId) return currentConversationId;
-    const conversation = await createConversation({
+    const conversation = await createConversationMutation({
       project_id: currentProjectId ?? undefined,
       title: text.slice(0, 32) || "新对话",
       provider_profile_id: currentProfileId ?? undefined,
@@ -422,7 +436,7 @@ export default function Home() {
 
     const conversationId = await ensureConversation(text);
     setInput("");
-    setMessages((current) => [...current, localMessage("user", text, "completed")]);
+    updateMessages(conversationId, (current) => [...current, localMessage("user", text, "completed")]);
     try {
       await sendChatStream(
         {
@@ -446,12 +460,12 @@ export default function Home() {
     if (event.event === "message_start") {
       setActiveRunId(event.data.run_id);
       setCurrentConversationId(event.data.conversation_id);
-      setMessages((current) => applyChatStreamEvent(current, event));
+      updateMessages(event.data.conversation_id, (current) => applyChatStreamEvent(current, event));
       return;
     }
 
     if (event.event === "delta" || event.event === "message_done") {
-      setMessages((current) => applyChatStreamEvent(current, event));
+      updateMessages(event.data.conversation_id, (current) => applyChatStreamEvent(current, event));
       return;
     }
 
@@ -462,8 +476,8 @@ export default function Home() {
 
     if (event.event === "error") {
       setError(event.data.message);
-      if (event.data.message_id) {
-        setMessages((current) => applyChatStreamEvent(current, event));
+      if (event.data.message_id && event.data.conversation_id) {
+        updateMessages(event.data.conversation_id, (current) => applyChatStreamEvent(current, event));
       }
     }
 
@@ -482,7 +496,7 @@ export default function Home() {
     const refreshedWorkflow = await getBidWorkflow(workflow.id);
     setActiveBidWorkflow(refreshedWorkflow);
     setCurrentConversationId(refreshedWorkflow.conversation_id);
-    setMessages(await listMessages(refreshedWorkflow.conversation_id));
+    await refreshMessages(refreshedWorkflow.conversation_id);
     await refreshConversations(currentProjectId);
   }
 
@@ -654,9 +668,7 @@ export default function Home() {
     try {
       const existing = currentProfileId ? profiles.find((profile) => profile.id === currentProfileId) : null;
       const payload = { ...values, api_key: values.api_key || undefined };
-      const profile = existing ? await updateProviderProfile(existing.id, payload) : await createProviderProfile(payload);
-      const nextProfiles = await listProviderProfiles();
-      setProfiles(nextProfiles);
+      const profile = existing ? await updateProfile(existing.id, payload) : await createProfile(payload);
       setCurrentProfileId(profile.id);
       setConfigOpen(false);
       setError(null);
@@ -669,12 +681,11 @@ export default function Home() {
   async function saveWebSearchConfig(values: WebSearchValues): Promise<WebSearchConfig> {
     try {
       const apiKeyValue = values.api_key.trim();
-      const updated = await updateWebSearchConfig({
+      const updated = await updateWebSearch({
         api_key: apiKeyValue || undefined,
         max_results: Number(values.max_results),
         search_depth: values.search_depth,
       });
-      setWebSearchConfig(updated);
       setError(null);
       return updated;
     } catch (caught) {
@@ -708,47 +719,34 @@ export default function Home() {
   }
 
   async function submitAuth(mode: AuthPanelMode, values: { username: string; password: string; confirmPassword: string }) {
-    const user = await submitAuthRequest(mode, { username: values.username, password: values.password });
-    if (user) await bootstrap();
+    await submitAuthRequest(mode, { username: values.username, password: values.password });
   }
 
-  async function changeCurrentPassword(event: FormEvent) {
-    event.preventDefault();
-    if (!passwordForm.currentPassword || !passwordForm.newPassword) {
-      setError("请输入当前密码和新密码。");
-      return;
-    }
-    if (passwordForm.newPassword !== passwordForm.confirmPassword) {
-      setError("两次输入的新密码不一致。");
-      return;
-    }
+  async function changeCurrentPassword(values: PasswordChangeValues) {
+    passwordChangeForm.clearErrors("root");
     try {
       await changePassword({
-        current_password: passwordForm.currentPassword,
-        new_password: passwordForm.newPassword,
+        current_password: values.currentPassword,
+        new_password: values.newPassword,
       });
       await logoutUser();
       setError("密码已修改，请重新登录。");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
+      passwordChangeForm.setError("root", { message: caught instanceof Error ? caught.message : String(caught) });
     }
   }
 
   async function logoutUser() {
     await logoutAuthSession();
     setUserPanelOpen(false);
-    setProjects([]);
-    setProjectConversations([]);
-    setRecentConversations([]);
-    setMessages([]);
-    setProfiles([]);
-    setWebSearchConfig(null);
+    clearWorkbenchData();
+    clearConfiguration();
     setWebSearchEnabled(false);
     setCurrentProjectId(null);
     setCurrentConversationId(null);
     setCurrentProfileId(null);
     setActiveBidWorkflow(null);
-    setPasswordForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
+    passwordChangeForm.reset();
   }
 
   async function openModelMenu() {
@@ -769,9 +767,7 @@ export default function Home() {
   async function chooseModel(modelId: string) {
     if (!currentProfileId || !currentProfile) return;
     try {
-      const updated = await updateProviderProfile(currentProfileId, { model: modelId });
-      const nextProfiles = await listProviderProfiles();
-      setProfiles(nextProfiles);
+      const updated = await updateProfile(currentProfileId, { model: modelId });
       setCurrentProfileId(updated.id);
       setModelMenuOpen(false);
       setError(null);
@@ -919,35 +915,36 @@ export default function Home() {
                   <input value={assistantChatAvatar} onChange={(event) => updateChatAvatar("assistant", event.target.value)} placeholder="文字、emoji 或图片 URL" />
                 </label>
               </div>
-              <form className="user-login-form" onSubmit={changeCurrentPassword}>
+              <form className="user-login-form" onSubmit={passwordChangeForm.handleSubmit(changeCurrentPassword)}>
                 <label>
                   当前密码
                   <input
-                    value={passwordForm.currentPassword}
+                    {...passwordChangeForm.register("currentPassword")}
                     type="password"
-                    onChange={(event) => setPasswordForm({ ...passwordForm, currentPassword: event.target.value })}
                     autoComplete="current-password"
                   />
+                  {passwordChangeForm.formState.errors.currentPassword && <small className="auth-field-error">{passwordChangeForm.formState.errors.currentPassword.message}</small>}
                 </label>
                 <label>
                   新密码
                   <input
-                    value={passwordForm.newPassword}
+                    {...passwordChangeForm.register("newPassword")}
                     type="password"
-                    onChange={(event) => setPasswordForm({ ...passwordForm, newPassword: event.target.value })}
                     autoComplete="new-password"
                   />
+                  {passwordChangeForm.formState.errors.newPassword && <small className="auth-field-error">{passwordChangeForm.formState.errors.newPassword.message}</small>}
                 </label>
                 <label>
                   确认新密码
                   <input
-                    value={passwordForm.confirmPassword}
+                    {...passwordChangeForm.register("confirmPassword")}
                     type="password"
-                    onChange={(event) => setPasswordForm({ ...passwordForm, confirmPassword: event.target.value })}
                     autoComplete="new-password"
                   />
+                  {passwordChangeForm.formState.errors.confirmPassword && <small className="auth-field-error">{passwordChangeForm.formState.errors.confirmPassword.message}</small>}
                 </label>
-                <button type="submit">修改密码</button>
+                {passwordChangeForm.formState.errors.root && <div className="auth-field-error">{passwordChangeForm.formState.errors.root.message}</div>}
+                <button type="submit" disabled={passwordChangeForm.formState.isSubmitting}>{passwordChangeForm.formState.isSubmitting ? "修改中" : "修改密码"}</button>
               </form>
             </div>
             <div className="user-panel-actions">

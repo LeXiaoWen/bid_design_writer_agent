@@ -227,14 +227,6 @@ class WorkbenchStore:
                 );
                 """
             )
-            self._ensure_column("projects", "workspace_path", "TEXT")
-            self._ensure_column("projects", "owner_user_id", "TEXT")
-            self._ensure_column("conversations", "context_summary", "TEXT NOT NULL DEFAULT ''")
-            provider_has_key_added = self._ensure_column("provider_profiles", "has_key", "INTEGER NOT NULL DEFAULT 0")
-            if provider_has_key_added:
-                self._connection.execute("UPDATE provider_profiles SET has_key = 1")
-            self._ensure_column("provider_profiles", "api_key", "TEXT")
-            self._ensure_column("provider_profiles", "owner_user_id", "TEXT")
             self._migrate_schema()
 
     def _execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
@@ -249,20 +241,42 @@ class WorkbenchStore:
         return False
 
     def _migrate_schema(self) -> None:
-        version = self._connection.execute("PRAGMA user_version").fetchone()[0]
-        if version >= SCHEMA_VERSION:
-            return
+        version = int(self._connection.execute("PRAGMA user_version").fetchone()[0])
+        migrations = {
+            1: self._migrate_to_v1,
+            2: self._migrate_to_v2,
+            3: self._migrate_to_v3,
+            4: self._migrate_to_v4,
+        }
+        while version < SCHEMA_VERSION:
+            target_version = version + 1
+            migrations[target_version]()
+            self._connection.execute(f"PRAGMA user_version = {target_version}")
+            version = target_version
 
-        if version < MULTI_TENANT_SCHEMA_VERSION:
-            self._connection.execute("DROP INDEX IF EXISTS idx_single_user")
-            owner = self._execute("SELECT id FROM users ORDER BY created_at LIMIT 1").fetchone()
-            if owner:
-                owner_user_id = owner["id"]
-                self._execute("UPDATE projects SET owner_user_id = ? WHERE owner_user_id IS NULL", (owner_user_id,))
-                self._execute("UPDATE provider_profiles SET owner_user_id = ? WHERE owner_user_id IS NULL", (owner_user_id,))
-                self._migrate_legacy_credentials(owner_user_id)
-            self._rebuild_search_index()
-        self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    def _migrate_to_v1(self) -> None:
+        self._ensure_column("projects", "workspace_path", "TEXT")
+
+    def _migrate_to_v2(self) -> None:
+        provider_has_key_added = self._ensure_column("provider_profiles", "has_key", "INTEGER NOT NULL DEFAULT 0")
+        if provider_has_key_added:
+            self._connection.execute("UPDATE provider_profiles SET has_key = 1")
+        self._ensure_column("provider_profiles", "api_key", "TEXT")
+
+    def _migrate_to_v3(self) -> None:
+        self._ensure_column("projects", "owner_user_id", "TEXT")
+        self._ensure_column("provider_profiles", "owner_user_id", "TEXT")
+        self._connection.execute("DROP INDEX IF EXISTS idx_single_user")
+        owner = self._execute("SELECT id FROM users ORDER BY created_at LIMIT 1").fetchone()
+        if owner:
+            owner_user_id = owner["id"]
+            self._execute("UPDATE projects SET owner_user_id = ? WHERE owner_user_id IS NULL", (owner_user_id,))
+            self._execute("UPDATE provider_profiles SET owner_user_id = ? WHERE owner_user_id IS NULL", (owner_user_id,))
+            self._migrate_legacy_credentials(owner_user_id)
+        self._rebuild_search_index()
+
+    def _migrate_to_v4(self) -> None:
+        self._ensure_column("conversations", "context_summary", "TEXT NOT NULL DEFAULT ''")
 
     def _backup_legacy_database_if_needed(self) -> None:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
