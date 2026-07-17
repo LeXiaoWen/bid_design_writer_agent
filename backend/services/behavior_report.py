@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Iterable
 
 from ..schemas import BidWorkflow, WorkbenchMessage
-from .workbench_store import data_dir, workbench_store
+from .workbench_store import data_dir, ensure_private_directory, restrict_file_permissions, workbench_store
 
 
 REPORT_FILENAME = "用户行为与需求摘要.md"
@@ -13,8 +13,7 @@ REPORT_FILENAME = "用户行为与需求摘要.md"
 
 def behavior_report_root() -> Path:
     root = data_dir() / "behavior_reports"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+    return ensure_private_directory(root)
 
 
 def behavior_report_path(user_id: str, workflow_id: str) -> Path:
@@ -152,6 +151,7 @@ def save_behavior_report(user_id: str, workflow_id: str) -> Path:
     messages = workbench_store.list_messages(user_id, workflow.conversation_id)
     report = build_behavior_report(workflow, messages, artifact_files)
     path = behavior_report_path(user_id, workflow.id)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(path.parent)
     path.write_text(report, encoding="utf-8")
+    restrict_file_permissions(path)
     return path

@@ -262,6 +262,16 @@ def test_provider_profile_does_not_echo_api_key():
     assert any(profile["id"] == payload["id"] for profile in listed.json())
 
 
+@pytest.mark.parametrize("base_url", ["http://api.example.com/v1", "https://localhost:8443/v1", "https://127.0.0.1/v1"])
+def test_provider_profile_rejects_non_public_https_base_urls(base_url):
+    response = client.post(
+        "/api/v1/provider-profiles",
+        json={"provider": "OpenAI", "display_name": "不安全地址", "base_url": base_url, "model": "gpt-4o"},
+    )
+
+    assert response.status_code == 422
+
+
 def test_managed_credentials_are_absent_from_database_and_api_responses():
     provider_secret = "sk-provider-secret-1234567890"
     tavily_secret = "tvly-managed-secret-1234567890"

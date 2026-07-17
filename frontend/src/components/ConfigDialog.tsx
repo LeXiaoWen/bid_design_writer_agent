@@ -28,7 +28,13 @@ export type WebSearchValues = {
 const profileSchema = z.object({
   provider: z.string().trim().min(1, "请选择 Provider。"),
   display_name: z.string().trim().min(1, "请输入显示名称。"),
-  base_url: z.string().trim().min(1, "请输入 Base URL。"),
+  base_url: z.string().trim().url("请输入有效的 Base URL。").refine((value) => {
+    try {
+      return new URL(value).protocol === "https:";
+    } catch {
+      return false;
+    }
+  }, "Base URL 必须使用 HTTPS。"),
   model: z.string().trim().min(1, "请输入模型名称。"),
   api_key: z.string(),
 });

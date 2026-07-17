@@ -37,7 +37,7 @@ from ..schemas import (
 from .artifacts import markdown_line_diff
 DEFAULT_PROJECT_TITLE = "默认项目"
 MULTI_TENANT_SCHEMA_VERSION = 3
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class CredentialVaultLocked(RuntimeError):
@@ -48,14 +48,29 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def ensure_private_directory(path: Path) -> Path:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+    return path
+
+
+def restrict_file_permissions(path: Path) -> None:
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
 def data_dir() -> Path:
     raw = os.getenv("AI_WORKBENCH_DATA_DIR")
     if raw:
         path = Path(raw).expanduser()
     else:
         path = Path.cwd() / ".data"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return ensure_private_directory(path)
 
 
 def db_path() -> Path:
@@ -72,6 +87,7 @@ class WorkbenchStore:
         self.path = path or db_path()
         self._lock = RLock()
         self._connection = sqlite3.connect(self.path, check_same_thread=False)
+        restrict_file_permissions(self.path)
         self._connection.row_factory = sqlite3.Row
         self._vault_keys: dict[str, bytes] = {}
         self._connection.execute("PRAGMA foreign_keys = ON")
@@ -238,6 +254,8 @@ class WorkbenchStore:
 
                 CREATE INDEX IF NOT EXISTS idx_bid_jobs_next ON bid_jobs(state, created_at);
 
+                CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at);
+
                 CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
                     owner_user_id UNINDEXED,
                     kind,
@@ -272,6 +290,7 @@ class WorkbenchStore:
             5: self._migrate_to_v5,
             6: self._migrate_to_v6,
             7: self._migrate_to_v7,
+            8: self._migrate_to_v8,
         }
         while version < SCHEMA_VERSION:
             target_version = version + 1
@@ -332,6 +351,9 @@ class WorkbenchStore:
             );
             """
         )
+
+    def _migrate_to_v8(self) -> None:
+        self._connection.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at)")
 
     def _backup_legacy_database_if_needed(self) -> None:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
@@ -409,6 +431,7 @@ class WorkbenchStore:
             self._execute("UPDATE provider_profiles SET api_key = NULL WHERE owner_user_id = ?", (user_id,))
             self.set_user_setting(user_id, "web_search.api_key", "")
             self.set_user_setting(user_id, "web_search.has_key", "1" if tavily_key else "0")
+        self._remove_recovery_backups(user_id)
 
     def _write_recovery_backup(self, user_id: str, password: str, values: dict[str, str]) -> Path:
         salt = os.urandom(16)
@@ -424,9 +447,16 @@ class WorkbenchStore:
         target.chmod(0o600)
         return target
 
-    def restore_latest_legacy_secrets(self, user_id: str, password: str) -> int:
+    def _recovery_backup_paths(self, user_id: str) -> list[Path]:
         recovery_dir = data_dir() / "credential-recovery"
-        candidates = sorted(recovery_dir.glob(f"{user_id}-*.json.enc"), reverse=True) if recovery_dir.exists() else []
+        return sorted(recovery_dir.glob(f"{user_id}-*.json.enc"), reverse=True) if recovery_dir.exists() else []
+
+    def _remove_recovery_backups(self, user_id: str) -> None:
+        for path in self._recovery_backup_paths(user_id):
+            path.unlink(missing_ok=True)
+
+    def restore_latest_legacy_secrets(self, user_id: str, password: str) -> int:
+        candidates = self._recovery_backup_paths(user_id)
         if not candidates:
             raise ValueError("未找到可恢复的旧密钥备份。")
         payload = json.loads(candidates[0].read_text(encoding="utf-8"))
@@ -440,12 +470,12 @@ class WorkbenchStore:
             values = json.loads(AESGCM(key).decrypt(nonce, ciphertext, user_id.encode("utf-8")))
         except Exception as exc:
             raise ValueError("恢复密码错误或备份文件已损坏。") from exc
-        restored = 0
+        vault_key = self._credential_vault_key(user_id)
+        credentials: list[tuple[str, str]] = []
+        profile_ids: list[str] = []
         for name, secret in values.items():
             if name == "tavily":
-                self.set_credential(user_id, self._tavily_credential_key(user_id), secret)
-                self.set_user_setting(user_id, "web_search.has_key", "1")
-                restored += 1
+                credentials.append((self._tavily_credential_key(user_id), secret))
                 continue
             if not name.startswith("provider:"):
                 continue
@@ -453,11 +483,35 @@ class WorkbenchStore:
             row = self._execute("SELECT id FROM provider_profiles WHERE id = ? AND owner_user_id = ?", (profile_id, user_id)).fetchone()
             if not row:
                 continue
-            credential_key = f"provider:{user_id}:{profile_id}"
-            self.set_credential(user_id, credential_key, secret)
-            self._execute("UPDATE provider_profiles SET credential_key = ?, has_key = 1, api_key = NULL WHERE id = ?", (credential_key, profile_id))
-            restored += 1
-        return restored
+            credentials.append((f"provider:{user_id}:{profile_id}", secret))
+            profile_ids.append(profile_id)
+        now = utc_now()
+        encrypted_credentials = []
+        for credential_key, secret in credentials:
+            credential_nonce = os.urandom(12)
+            credential_ciphertext = AESGCM(vault_key).encrypt(
+                credential_nonce,
+                secret.encode("utf-8"),
+                self._credential_aad(user_id, credential_key),
+            )
+            encrypted_credentials.append((credential_key, credential_nonce, credential_ciphertext))
+        with self._lock, self._connection:
+            for credential_key, credential_nonce, credential_ciphertext in encrypted_credentials:
+                self._execute(
+                    """
+                    INSERT INTO encrypted_credentials (user_id, credential_key, nonce, ciphertext, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id, credential_key) DO UPDATE SET nonce = excluded.nonce, ciphertext = excluded.ciphertext, updated_at = excluded.updated_at
+                    """,
+                    (user_id, credential_key, credential_nonce, credential_ciphertext, now, now),
+                )
+            for profile_id in profile_ids:
+                credential_key = f"provider:{user_id}:{profile_id}"
+                self._execute("UPDATE provider_profiles SET credential_key = ?, has_key = 1, api_key = NULL WHERE id = ?", (credential_key, profile_id))
+            if any(name == "tavily" for name in values):
+                self.set_user_setting(user_id, "web_search.has_key", "1")
+        self._remove_recovery_backups(user_id)
+        return len(credentials)
 
     def unlock_credential_vault(self, user_id: str, password: str) -> None:
         now = utc_now()
@@ -519,6 +573,7 @@ class WorkbenchStore:
         new_password: str,
         new_password_hash: str,
     ) -> None:
+        self._remove_recovery_backups(user_id)
         old_key = self._credential_vault_key(user_id)
         row = self._execute("SELECT salt FROM credential_vaults WHERE user_id = ?", (user_id,)).fetchone()
         if not row:
@@ -693,6 +748,7 @@ class WorkbenchStore:
     def create_auth_session(self, user_id: str, token_hash: str, expires_at: str) -> None:
         now = utc_now()
         with self._lock, self._connection:
+            self._execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (now,))
             self._execute(
                 """
                 INSERT INTO auth_sessions (id, user_id, token_hash, created_at, expires_at, revoked_at)
@@ -700,6 +756,11 @@ class WorkbenchStore:
                 """,
                 (str(uuid4()), user_id, token_hash, now, expires_at),
             )
+
+    def prune_expired_auth_sessions(self, now: str | None = None) -> int:
+        with self._lock, self._connection:
+            cursor = self._execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (now or utc_now(),))
+        return cursor.rowcount
 
     def get_auth_session_user(self, token_hash: str, now: str) -> AuthUser | None:
         row = self._execute(

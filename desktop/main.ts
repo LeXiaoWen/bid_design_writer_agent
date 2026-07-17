@@ -18,7 +18,7 @@ const PACKAGED_FRONTEND_CSP = [
   "frame-src 'none'",
   "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob: https:",
+  "img-src 'self' data: blob:",
   "font-src 'self' data:",
   "connect-src 'self' http://127.0.0.1:* http://localhost:*",
   "media-src 'self' blob:",
@@ -75,6 +75,18 @@ function delay(ms: number): Promise<void> {
 function isSafeExternalUrl(value: string): boolean {
   try {
     return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function isTrustedWindowUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if (app.isPackaged) {
+      return url.protocol === "app:" && url.hostname === "frontend";
+    }
+    return url.origin === new URL(FRONTEND_URL).origin;
   } catch {
     return false;
   }
@@ -280,6 +292,7 @@ async function createWindow(): Promise<void> {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      webviewTag: false,
     },
   });
 
@@ -293,6 +306,20 @@ async function createWindow(): Promise<void> {
     }
     return { action: "deny" };
   });
+
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (isTrustedWindowUrl(url)) return;
+    event.preventDefault();
+    if (isSafeExternalUrl(url)) {
+      void shell.openExternal(url).catch((error) => console.error("[desktop] failed to open external URL", error));
+    }
+  });
+
+  mainWindow.webContents.on("will-redirect", (event, url) => {
+    if (!isTrustedWindowUrl(url)) event.preventDefault();
+  });
+
+  mainWindow.webContents.on("will-attach-webview", (event) => event.preventDefault());
 
   const packagedFrontend = path.join(process.resourcesPath, "frontend", "index.html");
   if (app.isPackaged && existsSync(packagedFrontend)) {

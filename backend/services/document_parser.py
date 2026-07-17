@@ -19,6 +19,7 @@ MAX_ARCHIVE_ENTRIES = 4_096
 MAX_ARCHIVE_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
 MAX_ARCHIVE_COMPRESSION_RATIO = 200
 MAX_PDF_PAGES = 300
+MAX_OCR_PIXELS = 20_000_000
 MAX_XLSX_ROWS = 100_000
 
 
@@ -118,6 +119,8 @@ def _ocr_pdf_pages(content: bytes, page_numbers: list[int]) -> dict[int, str]:
     try:
         document = fitz.open(stream=content, filetype="pdf")
         try:
+            for page_number in page_numbers:
+                _validate_ocr_page_size(document.load_page(page_number - 1))
             engine = _get_ocr_engine()
             page_texts = {}
             for page_number in page_numbers:
@@ -141,6 +144,17 @@ def _ocr_pdf_pages(content: bytes, page_numbers: list[int]) -> dict[int, str]:
 def _ocr_result_text(result: Any) -> str:
     texts = getattr(result, "txts", ())
     return "\n".join(text.strip() for text in texts if isinstance(text, str) and text.strip())
+
+
+def _validate_ocr_page_size(page: Any) -> None:
+    rect = getattr(page, "rect", None)
+    width = getattr(rect, "width", None)
+    height = getattr(rect, "height", None)
+    if width is None or height is None:
+        return
+    pixels = int(float(width) * 2) * int(float(height) * 2)
+    if pixels > MAX_OCR_PIXELS:
+        raise ValueError(f"扫描 PDF 单页渲染像素不能超过 {MAX_OCR_PIXELS:,}。")
 
 
 def _pixmap_to_image(bitmap: Any) -> Any:
@@ -211,20 +225,38 @@ def _parse_legacy_doc(content: bytes) -> str:
         with tempfile.TemporaryDirectory(prefix="bid-doc-") as temp_dir:
             source = Path(temp_dir) / "document.doc"
             source.write_bytes(content)
+            run_options = {
+                "capture_output": True,
+                "check": False,
+                "timeout": 30,
+                "cwd": temp_dir,
+                "env": _converter_environment(temp_dir),
+                "start_new_session": True,
+            }
             if Path(converter).name == "textutil":
                 result = subprocess.run(
                     [converter, "-convert", "txt", "-stdout", str(source)],
-                    capture_output=True,
-                    check=False,
-                    timeout=30,
+                    **run_options,
                 )
                 output = result.stdout
             else:
+                profile_dir = Path(temp_dir) / "profile"
+                profile_dir.mkdir()
                 result = subprocess.run(
-                    [converter, "--headless", "--convert-to", "txt:Text", "--outdir", temp_dir, str(source)],
-                    capture_output=True,
-                    check=False,
-                    timeout=30,
+                    [
+                        converter,
+                        "--headless",
+                        "--nologo",
+                        "--nodefault",
+                        "--norestore",
+                        f"-env:UserInstallation={profile_dir.as_uri()}",
+                        "--convert-to",
+                        "txt:Text",
+                        "--outdir",
+                        temp_dir,
+                        str(source),
+                    ],
+                    **run_options,
                 )
                 output_path = Path(temp_dir) / "document.txt"
                 output = output_path.read_bytes() if output_path.exists() else b""
@@ -238,9 +270,6 @@ def _parse_legacy_doc(content: bytes) -> str:
 
 
 def _find_legacy_doc_converter() -> str | None:
-    configured = os.getenv("AI_WORKBENCH_DOC_CONVERTER", "").strip()
-    if configured and Path(configured).is_file():
-        return configured
     bundled = _bundled_legacy_doc_converter()
     if bundled:
         return bundled
@@ -251,6 +280,18 @@ def _find_legacy_doc_converter() -> str | None:
         if path:
             return path
     return None
+
+
+def _converter_environment(temp_dir: str) -> dict[str, str]:
+    environment = {
+        "HOME": temp_dir,
+        "PATH": os.defpath,
+        "TMPDIR": temp_dir,
+    }
+    for name in ("LANG", "LC_ALL", "SYSTEMROOT", "WINDIR"):
+        if value := os.getenv(name):
+            environment[name] = value
+    return environment
 
 
 def _agent_resource_dir() -> Path:

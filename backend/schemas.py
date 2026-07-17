@@ -1,7 +1,29 @@
 from enum import Enum
+from ipaddress import ip_address
 from typing import Any, Dict, List, Literal, Optional
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator
+
+
+def validate_provider_base_url(value: str) -> str:
+    base_url = value.strip()
+    try:
+        parsed = urlsplit(base_url)
+    except ValueError as exc:
+        raise ValueError("Base URL 格式无效。") from exc
+    hostname = (parsed.hostname or "").casefold()
+    if parsed.scheme != "https" or not hostname or parsed.username or parsed.password:
+        raise ValueError("Base URL 必须是公开的 HTTPS 地址。")
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        raise ValueError("Base URL 不能指向本机地址。")
+    try:
+        if not ip_address(hostname).is_global:
+            raise ValueError("Base URL 不能指向私网或回环地址。")
+    except ValueError as exc:
+        if str(exc).startswith("Base URL"):
+            raise
+    return base_url.rstrip("/")
 
 
 class BidWorkflowStatus(str, Enum):
@@ -34,6 +56,11 @@ class ApiConfig(BaseModel):
     base_url: str = "https://api.openai.com/v1"
     api_key: str = Field(min_length=1)
     model: str = "gpt-4o"
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        return validate_provider_base_url(value)
 
 
 class ArtifactInfo(BaseModel):
@@ -255,6 +282,11 @@ class ProviderProfileCreate(BaseModel):
     model: str = "gpt-4o"
     api_key: Optional[str] = None
 
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        return validate_provider_base_url(value)
+
 
 class ProviderProfileUpdate(BaseModel):
     provider: Optional[str] = None
@@ -262,6 +294,11 @@ class ProviderProfileUpdate(BaseModel):
     base_url: Optional[str] = None
     model: Optional[str] = None
     api_key: Optional[str] = None
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: Optional[str]) -> Optional[str]:
+        return validate_provider_base_url(value) if value is not None else None
 
 
 class WebSearchConfig(BaseModel):

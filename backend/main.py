@@ -530,6 +530,7 @@ bid_job_worker = BidJobWorker(run_bid_job)
 
 @app.on_event("startup")
 def start_bid_job_worker() -> None:
+    workbench_store.prune_expired_auth_sessions()
     if os.getenv("AI_WORKBENCH_TEST_MODE") != "1":
         bid_job_worker.start()
 

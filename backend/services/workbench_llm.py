@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from openai import AsyncOpenAI
 
-from ..schemas import BidWorkflowStatus, ChatStreamRequest, WorkbenchConversationCreate
+from ..schemas import BidWorkflowStatus, ChatStreamRequest, WorkbenchConversationCreate, validate_provider_base_url
 from .behavior_report import save_behavior_report
 from .logging_config import redact_log_text
 from .web_search import build_search_context, tavily_search
@@ -87,7 +87,7 @@ def _build_context_window(existing_summary: str, previous_messages: list[Any], p
 async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator[str]:
     profile = workbench_store.get_provider_profile(user_id, request.provider_profile_id) if request.provider_profile_id else None
     model = request.model or (profile.model if profile else DEFAULT_MODEL)
-    base_url = profile.base_url if profile else DEFAULT_BASE_URL
+    base_url = validate_provider_base_url(profile.base_url) if profile else DEFAULT_BASE_URL
     api_key = workbench_store.resolve_api_key(user_id, request.provider_profile_id, request.api_key)
 
     if not api_key:

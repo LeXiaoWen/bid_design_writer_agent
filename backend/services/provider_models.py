@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from openai import AsyncOpenAI
 
-from ..schemas import ProviderModel
+from ..schemas import ProviderModel, validate_provider_base_url
 from .workbench_store import workbench_store
 
 
@@ -12,7 +12,7 @@ async def list_provider_models(user_id: str, profile_id: str) -> list[ProviderMo
     if not api_key:
         raise ValueError("请先配置 API key。")
 
-    client = AsyncOpenAI(api_key=api_key, base_url=profile.base_url or None)
+    client = AsyncOpenAI(api_key=api_key, base_url=validate_provider_base_url(profile.base_url))
     response = await client.models.list()
     models = []
     for item in response.data:
