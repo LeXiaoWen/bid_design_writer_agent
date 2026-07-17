@@ -28,6 +28,7 @@ test("message_start inserts one streaming assistant message", () => {
       user_message_id: "user-1",
       run_id: "run-1",
       model: "deepseek-chat",
+      usage: { context_characters: 120, context_estimated_tokens: 30 },
     },
   };
 
@@ -37,6 +38,7 @@ test("message_start inserts one streaming assistant message", () => {
   assert.equal(messages.length, 1);
   assert.equal(messages[0].status, "streaming");
   assert.equal(messages[0].model, "deepseek-chat");
+  assert.deepEqual(messages[0].usage, { context_characters: 120, context_estimated_tokens: 30 });
   assert.equal(duplicate.length, 1);
 });
 

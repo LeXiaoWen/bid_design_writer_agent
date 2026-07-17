@@ -12,6 +12,7 @@ export function applyChatStreamEvent(messages: WorkbenchMessage[], event: ChatSt
         content: "",
         status: "streaming",
         model: event.data.model,
+        usage: event.data.usage,
         created_at: now,
         updated_at: now,
       },
@@ -32,7 +33,7 @@ export function applyChatStreamEvent(messages: WorkbenchMessage[], event: ChatSt
             content: event.data.content,
             status: event.data.status,
             finish_reason: event.data.finish_reason,
-            usage: event.data.usage,
+            usage: event.data.usage ?? message.usage,
             updated_at: now,
           }
         : message,

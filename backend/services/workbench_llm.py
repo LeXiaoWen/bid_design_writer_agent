@@ -49,6 +49,38 @@ def _build_context_summary(existing: str, messages: list[Any]) -> str:
     return "\n".join(lines)[-8_000:]
 
 
+def _context_characters(summary: str, messages: list[Any], pending_message: str = "") -> int:
+    return len(summary) + len(pending_message) + sum(len(message.content) for message in messages)
+
+
+def _context_usage(characters: int) -> dict[str, int]:
+    return {
+        "context_characters": characters,
+        "context_budget": CONTEXT_CHARACTER_BUDGET,
+        "context_estimated_tokens": (characters + 3) // 4,
+    }
+
+
+def _merge_usage(context_usage: dict[str, int], provider_usage: dict[str, Any] | None) -> dict[str, Any]:
+    return {**context_usage, **(provider_usage or {})}
+
+
+def _build_context_window(existing_summary: str, previous_messages: list[Any], pending_message: str) -> tuple[str, list[Any], bool]:
+    if _context_characters(existing_summary, previous_messages, pending_message) <= CONTEXT_CHARACTER_BUDGET:
+        return existing_summary, previous_messages, False
+
+    archived_messages = list(previous_messages[:-RECENT_CONTEXT_MESSAGES])
+    recent_messages = list(previous_messages[-RECENT_CONTEXT_MESSAGES:])
+    summary = _build_context_summary(existing_summary, archived_messages)
+    while recent_messages and _context_characters(summary, recent_messages, pending_message) > CONTEXT_CHARACTER_BUDGET:
+        archived_messages.append(recent_messages.pop(0))
+        summary = _build_context_summary(existing_summary, archived_messages)
+
+    available_summary_characters = max(CONTEXT_CHARACTER_BUDGET - len(pending_message), 0)
+    summary = summary[-available_summary_characters:] if available_summary_characters else ""
+    return summary, recent_messages, True
+
+
 async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator[str]:
     profile = workbench_store.get_provider_profile(user_id, request.provider_profile_id) if request.provider_profile_id else None
     model = request.model or (profile.model if profile else DEFAULT_MODEL)
@@ -74,12 +106,10 @@ async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator
 
     previous_messages = workbench_store.list_messages(user_id, conversation.id)
     context_summary = workbench_store.get_context_summary(user_id, conversation.id)
-    history_size = sum(len(message.content) for message in previous_messages)
-    if history_size > CONTEXT_CHARACTER_BUDGET:
-        archived_messages = previous_messages[:-RECENT_CONTEXT_MESSAGES]
-        context_summary = _build_context_summary(context_summary, archived_messages)
+    context_summary, previous_messages, summary_updated = _build_context_window(context_summary, previous_messages, request.message)
+    if summary_updated:
         workbench_store.set_context_summary(user_id, conversation.id, context_summary)
-        previous_messages = previous_messages[-RECENT_CONTEXT_MESSAGES:]
+    context_usage = _context_usage(_context_characters(context_summary, previous_messages, request.message))
     user_message = workbench_store.add_message(user_id, conversation.id, "user", request.message)
 
     # 若该对话存在标书工作流，用户每条消息都保存行为摘要
@@ -101,7 +131,7 @@ async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator
         except Exception as report_exc:
             print(f"[behavior-report] failed to save on chat for {active_workflow_ids[0]}: {report_exc}")
 
-    assistant_message = workbench_store.add_message(user_id, conversation.id, "assistant", "", status="streaming", model=model)
+    assistant_message = workbench_store.add_message(user_id, conversation.id, "assistant", "", status="streaming", model=model, usage=context_usage)
 
     run_id = str(uuid4())
     cancel_event = asyncio.Event()
@@ -115,6 +145,7 @@ async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator
             "user_message_id": user_message.id,
             "run_id": run_id,
             "model": model,
+            "usage": context_usage,
         },
     )
 
@@ -168,7 +199,7 @@ async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator
         async for chunk in stream:
             if cancel_event.is_set():
                 final_content = "".join(content_parts)
-                workbench_store.update_message(user_id, assistant_message.id, final_content, "interrupted", finish_reason="cancelled")
+                workbench_store.update_message(user_id, assistant_message.id, final_content, "interrupted", finish_reason="cancelled", usage=context_usage)
                 yield sse_event(
                     "message_done",
                     {
@@ -176,6 +207,7 @@ async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator
                         "message_id": assistant_message.id,
                         "status": "interrupted",
                         "finish_reason": "cancelled",
+                        "usage": context_usage,
                         "content": final_content,
                     },
                 )
@@ -195,7 +227,8 @@ async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator
             yield sse_event("delta", {"conversation_id": conversation.id, "message_id": assistant_message.id, "delta": delta})
 
         final_content = "".join(content_parts)
-        workbench_store.update_message(user_id, assistant_message.id, final_content, "completed", finish_reason=finish_reason, usage=usage)
+        merged_usage = _merge_usage(context_usage, usage)
+        workbench_store.update_message(user_id, assistant_message.id, final_content, "completed", finish_reason=finish_reason, usage=merged_usage)
         yield sse_event(
             "message_done",
             {
@@ -203,14 +236,14 @@ async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator
                 "message_id": assistant_message.id,
                 "status": "completed",
                 "finish_reason": finish_reason,
-                "usage": usage,
+                "usage": merged_usage,
                 "content": final_content,
             },
         )
     except Exception as exc:
         final_content = "".join(content_parts)
         message = str(exc)
-        workbench_store.update_message(user_id, assistant_message.id, final_content, "error", error=message)
+        workbench_store.update_message(user_id, assistant_message.id, final_content, "error", usage=context_usage, error=message)
         yield sse_event(
             "error",
             {

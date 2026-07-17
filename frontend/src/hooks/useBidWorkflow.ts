@@ -18,7 +18,9 @@ export function useBidWorkflow() {
     queryKey: ["bid-workflow", workflow?.id],
     queryFn: () => getBidWorkflow(workflow!.id),
     enabled: Boolean(workflow?.id),
-    refetchInterval: (current) => (isRunning(current.state.data ?? workflow) ? 1500 : false),
+    // The cached response may still be the pre-action "uploaded" state. Prefer the
+    // action response held in local state so polling starts immediately.
+    refetchInterval: () => (isRunning(workflow) ? 500 : false),
   });
 
   useEffect(() => {

@@ -2,6 +2,8 @@ import type {
   AuthLoginResponse,
   AuthStatus,
   AuthUser,
+  ArtifactVersion,
+  ArtifactVersionContent,
   BidArtifact,
   BidWorkflow,
   BidWorkflowActionResponse,
@@ -359,6 +361,26 @@ export function cancelBidWorkflow(workflowId: string): Promise<BidWorkflowAction
 
 export function listBidArtifacts(workflowId: string): Promise<BidArtifact[]> {
   return request<BidArtifact[]>(`/api/v1/bid-workflows/${workflowId}/artifacts`);
+}
+
+export function listBidArtifactVersions(workflowId: string, artifactName: string): Promise<ArtifactVersion[]> {
+  return request<ArtifactVersion[]>(`/api/v1/bid-workflows/${workflowId}/artifacts/versions?name=${encodeURIComponent(artifactName)}`);
+}
+
+export function getBidArtifactVersion(workflowId: string, artifactName: string, version: number): Promise<ArtifactVersionContent> {
+  return request<ArtifactVersionContent>(`/api/v1/bid-workflows/${workflowId}/artifacts/${encodeURIComponent(artifactName)}/versions/${version}`);
+}
+
+export function restoreBidArtifactVersion(workflowId: string, artifactName: string, version: number): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`/api/v1/bid-workflows/${workflowId}/artifacts/${encodeURIComponent(artifactName)}/versions/${version}/restore`, { method: "POST" });
+}
+
+export function updateBidArtifactContent(workflowId: string, artifactName: string, content: string): Promise<BidArtifact> {
+  return request<BidArtifact>(`/api/v1/bid-workflows/${workflowId}/artifacts/${encodeURIComponent(artifactName)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
 }
 
 export function downloadBidArtifactUrl(workflowId: string, artifactName: string): string {

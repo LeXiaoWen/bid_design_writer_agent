@@ -3,7 +3,7 @@ from urllib.parse import quote, unquote
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 
-from ..schemas import ArtifactVersion
+from ..schemas import ArtifactContentUpdate, ArtifactVersion, ArtifactVersionContent
 from ..services.artifacts import make_zip
 from ..services.workbench_store import workbench_store
 from .dependencies import current_user
@@ -34,6 +34,22 @@ def restore_bid_workflow_artifact_version(workflow_id: str, name: str, version: 
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="成果版本不存在。") from exc
     return {"ok": True}
+
+
+@router.get("/api/v1/bid-workflows/{workflow_id}/artifacts/{name}/versions/{version}", response_model=ArtifactVersionContent)
+def get_bid_workflow_artifact_version(workflow_id: str, name: str, version: int, request: Request):
+    try:
+        return workbench_store.get_bid_artifact_version(current_user(request).id, workflow_id, unquote(name), version)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="成果版本不存在。") from exc
+
+
+@router.patch("/api/v1/bid-workflows/{workflow_id}/artifacts/{name}")
+def update_bid_workflow_artifact(workflow_id: str, name: str, request: Request, payload: ArtifactContentUpdate):
+    try:
+        return workbench_store.update_bid_artifact_content(current_user(request).id, workflow_id, unquote(name), payload.content)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="成果文件不存在。") from exc
 
 
 @router.get("/api/v1/bid-workflows/{workflow_id}/artifacts/{name}")

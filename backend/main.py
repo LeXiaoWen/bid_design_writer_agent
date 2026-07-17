@@ -1,6 +1,7 @@
 from datetime import datetime
 import os
 import re
+import threading
 
 from fastapi import FastAPI, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -161,26 +162,97 @@ def workflow_is_cancelled(user_id: str, workflow_id: str) -> bool:
 def bid_model_progress(job_id: str, stage: str):
     received_chars = 0
     reported_chars = 0
+    lock = threading.Lock()
+    response_started = threading.Event()
+    stop_waiting = threading.Event()
     workbench_store.update_bid_job(job_id, progress=15, message="正在建立模型连接。")
 
     def report(delta: str) -> None:
         nonlocal received_chars, reported_chars
-        received_chars += len(delta)
-        if received_chars < reported_chars + 200:
-            return
-        reported_chars = received_chars
-        progress = min(90, 20 + received_chars // 100)
-        workbench_store.update_bid_job(
-            job_id,
-            progress=progress,
-            message=f"正在接收{stage}模型响应（{received_chars} 字）。",
-        )
+        with lock:
+            response_started.set()
+            received_chars += len(delta)
+            if reported_chars and received_chars < reported_chars + 200:
+                return
+            reported_chars = received_chars
+            progress = min(90, 20 + received_chars // 100)
+            workbench_store.update_bid_job(
+                job_id,
+                progress=progress,
+                message=f"正在接收{stage}模型响应（{received_chars} 字）。",
+            )
 
-    return report
+    def report_waiting() -> None:
+        elapsed = 0
+        while True:
+            if stop_waiting.wait(5):
+                return
+            elapsed += 5
+            with lock:
+                if response_started.is_set():
+                    return
+                workbench_store.update_bid_job(
+                    job_id,
+                    progress=min(19, 15 + elapsed // 5),
+                    message=f"正在等待{stage}模型响应（已等待 {elapsed} 秒）。",
+                )
+
+    threading.Thread(target=report_waiting, name=f"bid-model-progress-{job_id}", daemon=True).start()
+    return report, stop_waiting.set
+
+
+def bid_usage(instructions: str, prompt: str, output: str = "") -> dict[str, int | str]:
+    context_characters = len(instructions) + len(prompt)
+    completion_characters = len(output)
+    context_tokens = (context_characters + 3) // 4
+    completion_tokens = (completion_characters + 3) // 4
+    return {
+        "usage_source": "estimated",
+        "context_characters": context_characters,
+        "context_estimated_tokens": context_tokens,
+        "completion_estimated_tokens": completion_tokens,
+        "total_estimated_tokens": context_tokens + completion_tokens,
+    }
+
+
+def run_bid_agent_stream(
+    user_id: str,
+    message_id: str,
+    job_id: str,
+    stage: str,
+    api_config: ApiConfig,
+    instructions: str,
+    prompt: str,
+) -> str:
+    chunks: list[str] = []
+    published_length = 0
+    report_progress, stop_progress = bid_model_progress(job_id, stage)
+
+    def on_delta(delta: str) -> None:
+        nonlocal published_length
+        chunks.append(delta)
+        report_progress(delta)
+        content = "".join(chunks)
+        if len(content) - published_length < 24:
+            return
+        published_length = len(content)
+        workbench_store.update_streaming_message(user_id, message_id, content)
+
+    try:
+        result = run_agent(api_config, instructions, prompt, on_delta=on_delta)
+        if result and result != "".join(chunks):
+            workbench_store.update_streaming_message(user_id, message_id, result)
+        elif len("".join(chunks)) > published_length:
+            workbench_store.update_streaming_message(user_id, message_id, "".join(chunks))
+        return result
+    finally:
+        stop_progress()
 
 
 def run_bid_extraction_task(user_id: str, workflow_id: str, job_id: str | None = None) -> None:
     workflow = workbench_store.get_bid_workflow(user_id, workflow_id)
+    assistant_message = None
+    stream_usage = None
     try:
         if workflow.status == BidWorkflowStatus.CANCELLED:
             return
@@ -194,28 +266,38 @@ def run_bid_extraction_task(user_id: str, workflow_id: str, job_id: str | None =
 招标文件文本：
 {truncate_text(workflow.file_text)}
 """
+        instructions = build_stage1_instructions()
         if job_id:
-            result = run_agent(api_config, build_stage1_instructions(), prompt, on_delta=bid_model_progress(job_id, "阶段一"))
+            stream_usage = bid_usage(instructions, prompt)
+            assistant_message = workbench_store.add_message(user_id, workflow.conversation_id, "assistant", "", status="streaming", model=api_config.model, usage=stream_usage)
+            result = run_bid_agent_stream(user_id, assistant_message.id, job_id, "阶段一", api_config, instructions, prompt)
         else:
-            result = run_agent(api_config, build_stage1_instructions(), prompt)
+            result = run_agent(api_config, instructions, prompt)
         if workflow_is_cancelled(user_id, workflow_id):
+            if assistant_message:
+                workbench_store.update_message(user_id, assistant_message.id, result, "interrupted", finish_reason="cancelled", usage=bid_usage(instructions, prompt, result))
             return
         if job_id:
             workbench_store.update_bid_job(job_id, progress=92, message="正在整理阶段一提取结果。")
         saved = workbench_store.save_bid_extraction(user_id, workflow_id, result)
-        workbench_store.add_message(
-            user_id,
-            saved.conversation_id,
-            "assistant",
-            f"{result}\n\n请确认以上信息是否准确。确认后可进入阶段二生成设计方案。",
-        )
+        content = f"{result}\n\n请确认以上信息是否准确。确认后可进入阶段二生成设计方案。"
+        if assistant_message:
+            workbench_store.update_message(user_id, assistant_message.id, content, "completed", usage=bid_usage(instructions, prompt, result))
+        else:
+            workbench_store.add_message(user_id, saved.conversation_id, "assistant", content)
     except Exception as exc:
         failed = workbench_store.update_bid_workflow_status(user_id, workflow_id, BidWorkflowStatus.FAILED, error=str(exc))
-        workbench_store.add_message(user_id, failed.conversation_id, "assistant", f"阶段一提取失败：{exc}", status="error", error=str(exc))
+        if assistant_message:
+            partial_content = workbench_store.get_message(user_id, assistant_message.id).content
+            workbench_store.update_message(user_id, assistant_message.id, partial_content, "error", usage=stream_usage, error=str(exc))
+        else:
+            workbench_store.add_message(user_id, failed.conversation_id, "assistant", f"阶段一提取失败：{exc}", status="error", error=str(exc))
 
 
 def run_bid_generation_task(user_id: str, workflow_id: str, job_id: str | None = None) -> None:
     workflow = workbench_store.get_bid_workflow(user_id, workflow_id)
+    assistant_message = None
+    stream_usage = None
     try:
         if workflow.status == BidWorkflowStatus.CANCELLED:
             return
@@ -233,11 +315,16 @@ def run_bid_generation_task(user_id: str, workflow_id: str, job_id: str | None =
 
 请执行阶段二：生成当前建筑设计范围内的完整方案。图文需求、制作规范汇总和其他附表仅在当前招标文件或已确认资料实际触发时输出。
 """
+        instructions = build_stage2_instructions()
         if job_id:
-            result = run_agent(api_config, build_stage2_instructions(), prompt, on_delta=bid_model_progress(job_id, "阶段二"))
+            stream_usage = bid_usage(instructions, prompt)
+            assistant_message = workbench_store.add_message(user_id, workflow.conversation_id, "assistant", "", status="streaming", model=api_config.model, usage=stream_usage)
+            result = run_bid_agent_stream(user_id, assistant_message.id, job_id, "阶段二", api_config, instructions, prompt)
         else:
-            result = run_agent(api_config, build_stage2_instructions(), prompt)
+            result = run_agent(api_config, instructions, prompt)
         if workflow_is_cancelled(user_id, workflow_id):
+            if assistant_message:
+                workbench_store.update_message(user_id, assistant_message.id, result, "interrupted", finish_reason="cancelled", usage=bid_usage(instructions, prompt, result))
             return
         if job_id:
             workbench_store.update_bid_job(job_id, progress=92, message="正在生成成果文件。")
@@ -248,10 +335,18 @@ def run_bid_generation_task(user_id: str, workflow_id: str, job_id: str | None =
             save_behavior_report(user_id, completed.id)
         except Exception as report_exc:
             print(f"[behavior-report] failed to save report for {completed.id}: {report_exc}")
-        workbench_store.add_message(user_id, completed.conversation_id, "assistant", f"{result}\n\n生成完成，可下载 Markdown 文件或 ZIP 包。")
+        content = f"{result}\n\n生成完成，可下载 Markdown 文件或 ZIP 包。"
+        if assistant_message:
+            workbench_store.update_message(user_id, assistant_message.id, content, "completed", usage=bid_usage(instructions, prompt, result))
+        else:
+            workbench_store.add_message(user_id, completed.conversation_id, "assistant", content)
     except Exception as exc:
         failed = workbench_store.update_bid_workflow_status(user_id, workflow_id, BidWorkflowStatus.FAILED, error=str(exc))
-        workbench_store.add_message(user_id, failed.conversation_id, "assistant", f"阶段二生成失败：{exc}", status="error", error=str(exc))
+        if assistant_message:
+            partial_content = workbench_store.get_message(user_id, assistant_message.id).content
+            workbench_store.update_message(user_id, assistant_message.id, partial_content, "error", usage=stream_usage, error=str(exc))
+        else:
+            workbench_store.add_message(user_id, failed.conversation_id, "assistant", f"阶段二生成失败：{exc}", status="error", error=str(exc))
 
 
 def run_bid_job(job_id: str, user_id: str, workflow_id: str, kind: str) -> None:

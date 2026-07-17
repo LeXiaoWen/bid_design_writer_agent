@@ -66,6 +66,17 @@ export type BidArtifact = {
   kind: "extraction" | "proposal" | "drawing" | "spec" | "file" | string;
 };
 
+export type ArtifactVersion = {
+  name: string;
+  version: number;
+  size: number;
+  created_at: string;
+};
+
+export type ArtifactVersionContent = ArtifactVersion & {
+  content: string;
+};
+
 export type BidWorkflowExecution = {
   state: "queued" | "running" | "failed" | "cancelled" | "completed" | string;
   phase: "extraction" | "generation" | string;
@@ -146,6 +157,7 @@ export type ChatStreamEvent =
         user_message_id: string;
         run_id: string;
         model: string;
+        usage?: Record<string, unknown> | null;
       };
     }
   | {

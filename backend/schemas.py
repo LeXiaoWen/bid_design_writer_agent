@@ -49,6 +49,14 @@ class ArtifactVersion(BaseModel):
     created_at: str
 
 
+class ArtifactVersionContent(ArtifactVersion):
+    content: str
+
+
+class ArtifactContentUpdate(BaseModel):
+    content: str
+
+
 class BidWorkflow(BaseModel):
     id: str
     project_id: str

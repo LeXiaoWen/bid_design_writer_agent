@@ -445,12 +445,17 @@ def test_bid_workflow_v1_full_chain(monkeypatch):
     profile_id = created_profile.json()["id"]
     seen_models = []
     streamed_progress = []
+    streamed_contents = []
+    streamed_statuses = []
 
     def fake_run_agent(api_config, instructions, prompt, on_delta=None):
         seen_models.append(api_config.model)
         if on_delta:
             on_delta("模型响应" * 80)
             streamed_progress.append(workbench_store.get_bid_execution(workflow_id).progress)
+            streamed_message = workbench_store.list_messages(TEST_USER_ID, conversation_id)[-1]
+            streamed_contents.append(streamed_message.content)
+            streamed_statuses.append(streamed_message.status)
         if "阶段二" in prompt:
             return "## 方案正文\n内容\n## 绘图提示词 + 专业图纸需求清单\n提示词"
         return "# 测试项目 — 招标文件信息提取\n\n## 四、标书制作规范\n字体要求"
@@ -499,6 +504,13 @@ def test_bid_workflow_v1_full_chain(monkeypatch):
     assert len(completed["artifacts"]) == 4
     assert seen_models == ["deepseek-chat", "deepseek-chat"]
     assert all(progress > 20 for progress in streamed_progress)
+    assert all(content == "模型响应" * 80 for content in streamed_contents)
+    assert streamed_statuses == ["streaming", "streaming"]
+    skill_messages = [message for message in client.get(f"/api/v1/conversations/{conversation_id}/messages").json() if message.get("model") == "deepseek-chat"]
+    assert len(skill_messages) == 2
+    assert all(message["usage"]["usage_source"] == "estimated" for message in skill_messages)
+    assert all(message["usage"]["context_estimated_tokens"] > 0 for message in skill_messages)
+    assert all(message["usage"]["total_estimated_tokens"] >= message["usage"]["context_estimated_tokens"] for message in skill_messages)
 
     listed = client.get("/api/v1/bid-workflows", params={"conversation_id": conversation_id})
     assert listed.status_code == 200
@@ -567,6 +579,36 @@ def _create_completed_bid_workflow() -> str:
     return workflow.id
 
 
+def test_bid_artifact_versions_are_immutable_and_restorable():
+    workflow_id = _create_completed_bid_workflow()
+    artifact_name = "行为摘要测试项目_设计方案.md"
+    files = workbench_store.get_bid_artifact_files(TEST_USER_ID, workflow_id)
+    files[artifact_name] = "# 修订版设计方案"
+    workbench_store.save_bid_artifacts(TEST_USER_ID, workflow_id, files)
+
+    encoded_name = quote(artifact_name, safe="")
+    versions = client.get(f"/api/v1/bid-workflows/{workflow_id}/artifacts/versions", params={"name": artifact_name})
+    assert versions.status_code == 200
+    assert [item["version"] for item in versions.json()] == [2, 1]
+
+    original = client.get(f"/api/v1/bid-workflows/{workflow_id}/artifacts/{encoded_name}/versions/1")
+    assert original.status_code == 200
+    assert original.json()["content"] == "# 设计方案"
+
+    restored = client.post(f"/api/v1/bid-workflows/{workflow_id}/artifacts/{encoded_name}/versions/1/restore")
+    assert restored.status_code == 200
+    assert client.get(f"/api/v1/bid-workflows/{workflow_id}/artifacts/{encoded_name}").text == "# 设计方案"
+
+    versions_after_restore = client.get(f"/api/v1/bid-workflows/{workflow_id}/artifacts/versions", params={"name": artifact_name})
+    assert [item["version"] for item in versions_after_restore.json()] == [3, 2, 1]
+
+    edited = client.patch(f"/api/v1/bid-workflows/{workflow_id}/artifacts/{encoded_name}", json={"content": "# 手动编辑设计方案"})
+    assert edited.status_code == 200
+    assert edited.json()["size"] == len("# 手动编辑设计方案".encode("utf-8"))
+    assert client.get(f"/api/v1/bid-workflows/{workflow_id}/artifacts/{encoded_name}/versions/4").json()["content"] == "# 手动编辑设计方案"
+    assert client.get(f"/api/v1/bid-workflows/{workflow_id}/artifacts/{encoded_name}/versions/1").json()["content"] == "# 设计方案"
+
+
 def test_behavior_report_saves_markdown_locally_and_redacts_sensitive():
     workflow_id = _create_completed_bid_workflow()
     path = save_behavior_report(TEST_USER_ID, workflow_id)
@@ -619,6 +661,24 @@ def test_bid_workflow_cancel_prevents_late_extraction_save(monkeypatch):
     cancelled = workbench_store.get_bid_workflow(TEST_USER_ID, workflow.id)
     assert cancelled.status == BidWorkflowStatus.CANCELLED
     assert cancelled.extracted_markdown == ""
+
+
+def test_bid_model_progress_updates_on_first_stream_chunk(monkeypatch):
+    from backend.main import bid_model_progress
+
+    updates = []
+    monkeypatch.setattr("backend.main.workbench_store.update_bid_job", lambda job_id, **values: updates.append((job_id, values)))
+
+    report, stop = bid_model_progress("job-1", "阶段一")
+    try:
+        report("首个分片")
+    finally:
+        stop()
+
+    assert updates == [
+        ("job-1", {"progress": 15, "message": "正在建立模型连接。"}),
+        ("job-1", {"progress": 20, "message": "正在接收阶段一模型响应（4 字）。"}),
+    ]
 
 
 def test_bid_workflow_cancel_prevents_late_generation_save(monkeypatch):

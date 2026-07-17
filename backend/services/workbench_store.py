@@ -945,6 +945,39 @@ class WorkbenchStore:
         query += " ORDER BY name, version DESC"
         return [dict(row) for row in self._execute(query, params).fetchall()]
 
+    def get_bid_artifact_version(self, user_id: str, workflow_id: str, name: str, version: int) -> dict[str, Any]:
+        self.get_bid_workflow(user_id, workflow_id)
+        row = self._execute(
+            "SELECT name, version, content, length(content) AS size, created_at FROM bid_artifact_versions WHERE workflow_id = ? AND name = ? AND version = ?",
+            (workflow_id, name, version),
+        ).fetchone()
+        if not row:
+            raise KeyError(version)
+        return dict(row)
+
+    def update_bid_artifact_content(self, user_id: str, workflow_id: str, name: str, content: str) -> ArtifactInfo:
+        workflow = self.get_bid_workflow(user_id, workflow_id)
+        artifact = self._execute("SELECT id FROM bid_artifacts WHERE workflow_id = ? AND name = ?", (workflow_id, name)).fetchone()
+        if not artifact:
+            raise KeyError(name)
+        now = utc_now()
+        with self._lock, self._connection:
+            next_version = self._execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 AS version FROM bid_artifact_versions WHERE workflow_id = ? AND name = ?",
+                (workflow_id, name),
+            ).fetchone()["version"]
+            self._execute(
+                "INSERT INTO bid_artifact_versions (id, workflow_id, name, version, content, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (str(uuid4()), workflow_id, name, next_version, content, now),
+            )
+            self._execute(
+                "UPDATE bid_artifacts SET content = ?, size = ?, updated_at = ? WHERE id = ?",
+                (content, len(content.encode("utf-8")), now, artifact["id"]),
+            )
+            self._touch_conversation(workflow.conversation_id, now)
+            self._touch_project(workflow.project_id, now)
+        return next(item for item in self.list_bid_artifacts(user_id, workflow_id) if item.name == name)
+
     def restore_bid_artifact_version(self, user_id: str, workflow_id: str, name: str, version: int) -> None:
         workflow = self.get_bid_workflow(user_id, workflow_id)
         row = self._execute(
@@ -965,7 +998,7 @@ class WorkbenchStore:
             )
             self._execute(
                 "UPDATE bid_artifacts SET content = ?, size = ?, updated_at = ? WHERE workflow_id = ? AND name = ?",
-                (row["content"], len(row["content"]), now, workflow_id, name),
+                (row["content"], len(row["content"].encode("utf-8")), now, workflow_id, name),
             )
             self._touch_conversation(workflow.conversation_id, now)
 
@@ -1071,6 +1104,15 @@ class WorkbenchStore:
             self._touch_project(conversation.project_id, now)
             self._upsert_search(user_id, "message", message_id, conversation.project_id, message.conversation_id, message.role, content)
         return self.get_message(user_id, message_id)
+
+    def update_streaming_message(self, user_id: str, message_id: str, content: str) -> None:
+        """Persist partial LLM output without repeatedly updating search indexes."""
+        self.get_message(user_id, message_id)
+        with self._lock, self._connection:
+            self._execute(
+                "UPDATE messages SET content = ?, updated_at = ? WHERE id = ? AND status = 'streaming'",
+                (content, utc_now(), message_id),
+            )
 
     def get_message(self, user_id: str, message_id: str) -> WorkbenchMessage:
         row = self._execute(
