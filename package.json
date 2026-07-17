@@ -1,6 +1,6 @@
 {
   "name": "bid-design-writer-desktop",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "建筑设计标书方案助手桌面应用",
   "author": "AI Workbench",
   "private": true,
@@ -14,6 +14,7 @@
     "build": "node scripts/ensure-frontend-dependencies.mjs && npm --prefix frontend run build && npm run build:desktop",
     "build:agent": "node scripts/build-agent.mjs",
     "build:desktop": "tsc -p desktop/tsconfig.json",
+    "smoke:packaged-agent": "node scripts/smoke-packaged-agent.mjs",
     "pack": "node scripts/package-desktop.mjs --dir",
     "pack:mac": "node scripts/package-desktop.mjs --target mac --dir",
     "pack:win": "node scripts/package-desktop.mjs --target win --dir",

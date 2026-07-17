@@ -28,7 +28,7 @@ ocr_binaries = collect_dynamic_libs("pymupdf") + [
     (str(path), "onnxruntime/capi")
     for path in onnxruntime_capi_dir.glob("onnxruntime_pybind11_state.*")
 ]
-ocr_datas = collect_data_files("rapidocr", includes=["models/*.onnx"])
+ocr_datas = collect_data_files("rapidocr", includes=["*.yaml", "models/*"])
 
 if sys.platform == "win32":
     hiddenimports.extend([
@@ -82,7 +82,8 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,
+    # Electron 通过 stdout 读取随机端口；Windows 端由 spawn 的 windowsHide 隐藏控制台窗口。
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

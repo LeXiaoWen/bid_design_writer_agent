@@ -1,7 +1,18 @@
 import io
 import re
 import zipfile
+from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Dict, List
+
+
+@dataclass(frozen=True)
+class MarkdownSection:
+    heading: str
+    title: str
+    body: str
+    start: int
+    end: int
 
 
 def infer_project_name(text: str) -> str:
@@ -56,6 +67,52 @@ def extract_section(text: str, heading_keywords: List[str]) -> str:
                     break
             return text[start:end].strip()
     return ""
+
+
+def find_markdown_section(text: str, title: str) -> MarkdownSection:
+    expected = title.strip()
+    if not expected:
+        raise ValueError("请输入要修改的章节标题。")
+    matches = list(re.finditer(r"^(#{1,6})\s+(.+?)\s*$", text, flags=re.MULTILINE))
+    for index, match in enumerate(matches):
+        if match.group(2).strip() != expected:
+            continue
+        level = len(match.group(1))
+        end = len(text)
+        for next_match in matches[index + 1 :]:
+            if len(next_match.group(1)) <= level:
+                end = next_match.start()
+                break
+        return MarkdownSection(
+            heading=match.group(0).strip(),
+            title=match.group(2).strip(),
+            body=text[match.end() : end].strip(),
+            start=match.start(),
+            end=end,
+        )
+    raise ValueError(f"未找到标题为“{expected}”的 Markdown 章节。")
+
+
+def replace_markdown_section(text: str, section: MarkdownSection, body: str) -> str:
+    rewritten_body = body.strip()
+    if not rewritten_body:
+        raise ValueError("模型未返回章节正文，请重试。")
+    replacement = f"{section.heading}\n\n{rewritten_body}"
+    return f"{text[:section.start]}{replacement}{text[section.end:]}"
+
+
+def markdown_line_diff(base_content: str, compare_content: str) -> list[dict[str, str]]:
+    base_lines = base_content.splitlines()
+    compare_lines = compare_content.splitlines()
+    lines: list[dict[str, str]] = []
+    for operation, base_start, base_end, compare_start, compare_end in SequenceMatcher(None, base_lines, compare_lines).get_opcodes():
+        if operation == "equal":
+            lines.extend({"kind": "unchanged", "content": line} for line in base_lines[base_start:base_end])
+        elif operation in {"replace", "delete"}:
+            lines.extend({"kind": "removed", "content": line} for line in base_lines[base_start:base_end])
+        if operation in {"replace", "insert"}:
+            lines.extend({"kind": "added", "content": line} for line in compare_lines[compare_start:compare_end])
+    return lines
 
 
 def has_confirmed_content(section: str) -> bool:

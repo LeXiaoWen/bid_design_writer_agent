@@ -42,7 +42,7 @@ from .routers.projects import router as projects_router
 from .routers.config import router as config_router
 from .routers.chat import router as chat_router
 from .routers.bid_workflows import create_router as create_bid_workflows_router
-from .routers.artifacts import router as artifacts_router
+from .routers.artifacts import create_router as create_artifacts_router
 
 load_dotenv()
 configure_logging()
@@ -73,7 +73,6 @@ app.include_router(auth_router)
 app.include_router(projects_router)
 app.include_router(config_router)
 app.include_router(chat_router)
-app.include_router(artifacts_router)
 
 
 @app.exception_handler(CredentialStoreUnavailable)
@@ -531,6 +530,12 @@ app.include_router(
         public_bid_workflow=lambda workflow: public_bid_workflow(workflow),
         save_behavior_report=lambda user_id, workflow_id: save_behavior_report(user_id, workflow_id),
         stream_bid_events=lambda user_id, workflow_id: stream_bid_workflow_events(user_id, workflow_id),
+    )
+)
+app.include_router(
+    create_artifacts_router(
+        api_config_from_profile=lambda user_id, profile_id: api_config_from_profile(user_id, profile_id),
+        run_agent=lambda api_config, instructions, prompt: run_agent(api_config, instructions, prompt),
     )
 )
 

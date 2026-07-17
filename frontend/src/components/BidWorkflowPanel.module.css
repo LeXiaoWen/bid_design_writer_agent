@@ -46,6 +46,7 @@
 
 .artifactRow {
   display: flex;
+  flex-wrap: wrap;
   min-width: 0;
   gap: 6px;
 }
@@ -117,6 +118,58 @@
   opacity: 0.78;
 }
 
+.diffControls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.diffControls label {
+  display: grid;
+  gap: 3px;
+  color: #667277;
+  font-size: 12px;
+}
+
+.diffControls select {
+  border: 1px solid #cbd8d5;
+  border-radius: 6px;
+  padding: 4px 6px;
+  background: #fff;
+  color: #304247;
+}
+
+.diffPanel {
+  margin-top: 10px;
+}
+
+.diffPanel > strong {
+  color: #536064;
+  font-size: 12px;
+}
+
+.diffPanel pre {
+  max-height: 260px;
+  margin: 7px 0 0;
+  overflow: auto;
+  padding: 9px;
+  border-radius: 7px;
+  background: #fff;
+  font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+}
+
+.diffAdded,
+.diffRemoved,
+.diffUnchanged {
+  display: block;
+}
+
+.diffAdded { background: #e5f6eb; color: #21653b; }
+.diffRemoved { background: #fde9e7; color: #9a3028; }
+.diffUnchanged { color: #788388; }
+
 .versionPreview {
   margin-top: 10px;
 }
@@ -165,4 +218,43 @@
   background: #fff;
   color: #24383b;
   font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.rewritePanel {
+  flex-basis: 100%;
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 2px;
+  padding: 10px;
+  border: 1px solid #d9e7e3;
+  border-radius: 8px;
+  background: #f8fbfa;
+}
+
+.rewritePanel label {
+  display: grid;
+  gap: 4px;
+  color: #536064;
+  font-size: 12px;
+}
+
+.rewritePanel input,
+.rewritePanel textarea {
+  width: 100%;
+  border: 1px solid #bdd2cd;
+  border-radius: 6px;
+  padding: 7px 8px;
+  background: #fff;
+  color: #24383b;
+  font: inherit;
+}
+
+.rewritePanel textarea {
+  resize: vertical;
+}
+
+.rewriteActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
 }

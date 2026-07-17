@@ -77,6 +77,13 @@ export type ArtifactVersionContent = ArtifactVersion & {
   content: string;
 };
 
+export type ArtifactVersionDiff = {
+  name: string;
+  base_version: number;
+  compare_version: number;
+  lines: Array<{ kind: "added" | "removed" | "unchanged"; content: string }>;
+};
+
 export type BidWorkflowExecution = {
   state: "queued" | "running" | "failed" | "cancelled" | "completed" | string;
   phase: "extraction" | "generation" | string;

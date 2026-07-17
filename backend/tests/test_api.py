@@ -657,6 +657,54 @@ def test_bid_artifact_versions_are_immutable_and_restorable():
     assert client.get(f"/api/v1/bid-workflows/{workflow_id}/artifacts/{encoded_name}/versions/1").json()["content"] == "# 设计方案"
 
 
+def test_bid_artifact_section_rewrite_replaces_only_requested_section(monkeypatch):
+    workflow_id = _create_completed_bid_workflow()
+    artifact_name = "行为摘要测试项目_设计方案.md"
+    original = "# 设计方案\n\n## 总体策略\n旧策略\n\n## 服务计划\n保持不变"
+    workbench_store.update_bid_artifact_content(TEST_USER_ID, workflow_id, artifact_name, original)
+
+    def fake_run_agent(api_config, instructions, prompt):
+        assert "章节标题：总体策略" in prompt
+        assert "加强低碳设计" in prompt
+        assert "旧策略" in prompt
+        return "采用低碳、韧性与场地协同策略。"
+
+    monkeypatch.setattr("backend.main.run_agent", fake_run_agent)
+    response = client.post(
+        f"/api/v1/bid-workflows/{workflow_id}/artifacts/{quote(artifact_name, safe='')}/rewrite-section",
+        json={"heading": "总体策略", "instruction": "加强低碳设计"},
+    )
+
+    assert response.status_code == 200
+    revised = workbench_store.get_bid_artifact_content(TEST_USER_ID, workflow_id, artifact_name)
+    assert "## 总体策略\n\n采用低碳、韧性与场地协同策略。" in revised
+    assert "## 服务计划\n保持不变" in revised
+    assert "旧策略" not in revised
+    versions = workbench_store.list_bid_artifact_versions(TEST_USER_ID, workflow_id, artifact_name)
+    assert versions[0]["version"] == 3
+
+
+def test_bid_artifact_versions_can_be_compared():
+    workflow_id = _create_completed_bid_workflow()
+    artifact_name = "行为摘要测试项目_设计方案.md"
+    workbench_store.update_bid_artifact_content(TEST_USER_ID, workflow_id, artifact_name, "## 设计方案\n新内容")
+
+    response = client.get(
+        f"/api/v1/bid-workflows/{workflow_id}/artifacts/{quote(artifact_name, safe='')}/versions/diff",
+        params={"base_version": 1, "compare_version": 2},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["base_version"] == 1
+    assert payload["compare_version"] == 2
+    assert {"removed", "added"}.issubset({line["kind"] for line in payload["lines"]})
+    assert client.get(
+        f"/api/v1/bid-workflows/{workflow_id}/artifacts/{quote(artifact_name, safe='')}/versions/diff",
+        params={"base_version": 2, "compare_version": 2},
+    ).status_code == 400
+
+
 def test_behavior_report_saves_markdown_locally_and_redacts_sensitive():
     workflow_id = _create_completed_bid_workflow()
     path = save_behavior_report(TEST_USER_ID, workflow_id)
@@ -927,7 +975,7 @@ def test_bid_workflow_v1_rejects_parse_error_and_missing_key():
         files={"file": ("old.doc", b"abc", "application/msword")},
     )
     assert parse_error.status_code == 400
-    assert "仅支持" in parse_error.json()["detail"]
+    assert "签名不匹配" in parse_error.json()["detail"]
 
 
 def test_bid_workflow_upload_rejects_oversized_file(monkeypatch):

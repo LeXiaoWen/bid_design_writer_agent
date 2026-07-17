@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -53,8 +53,25 @@ class ArtifactVersionContent(ArtifactVersion):
     content: str
 
 
+class ArtifactVersionDiffLine(BaseModel):
+    kind: Literal["added", "removed", "unchanged"]
+    content: str
+
+
+class ArtifactVersionDiff(BaseModel):
+    name: str
+    base_version: int
+    compare_version: int
+    lines: List[ArtifactVersionDiffLine]
+
+
 class ArtifactContentUpdate(BaseModel):
     content: str
+
+
+class ArtifactSectionRewriteRequest(BaseModel):
+    heading: str = Field(min_length=1, max_length=160)
+    instruction: str = Field(min_length=1, max_length=4_000)
 
 
 class BidWorkflow(BaseModel):

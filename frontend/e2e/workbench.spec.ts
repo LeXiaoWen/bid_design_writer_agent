@@ -165,6 +165,26 @@ async function mockCompletedBidWorkflowApi(page: import("@playwright/test").Page
       };
       return json({ workflow, message: "阶段二设计方案生成已开始。" });
     }
+    if (pathname.endsWith("/versions/diff")) {
+      return json({
+        name: "阶段二测试_设计方案.md",
+        base_version: 1,
+        compare_version: 2,
+        lines: [
+          { kind: "removed", content: "旧策略" },
+          { kind: "added", content: "新策略" },
+        ],
+      });
+    }
+    if (pathname.endsWith("/versions")) {
+      return json([
+        { name: "阶段二测试_设计方案.md", version: 2, size: 156, created_at: "2026-01-01T00:01:00.000Z" },
+        { name: "阶段二测试_设计方案.md", version: 1, size: 128, created_at: "2026-01-01T00:00:00.000Z" },
+      ]);
+    }
+    if (pathname.endsWith("/rewrite-section") && method === "POST") {
+      return json({ name: "阶段二测试_设计方案.md", size: 156, kind: "proposal" });
+    }
     return json({ detail: `Unexpected API request: ${method} ${pathname}` }, 500);
   });
 }
@@ -231,4 +251,16 @@ test("确认阶段一后可完成阶段二并展示成果下载入口", async ({
   await expect(page.getByRole("button", { name: "下载 Markdown 文件" })).toBeVisible();
   await expect(page.getByRole("button", { name: "下载 ZIP 包" })).toBeVisible();
   await expect(page.getByRole("button", { name: "阶段二测试_设计方案.md" })).toBeVisible();
+
+  await page.getByRole("button", { name: "AI 改章节" }).first().click();
+  await page.getByLabel("阶段二测试_设计方案.md 章节标题").fill("总体策略");
+  await page.getByLabel("阶段二测试_设计方案.md 章节修改要求").fill("加强低碳设计");
+  const rewriteRequest = page.waitForRequest((request) => new URL(request.url()).pathname.endsWith("/rewrite-section"));
+  await page.getByRole("button", { name: "仅重写此章节" }).click();
+  expect((await rewriteRequest).postDataJSON()).toEqual({ heading: "总体策略", instruction: "加强低碳设计" });
+
+  await page.getByRole("button", { name: "版本" }).first().click();
+  await expect(page.getByText("v1 → v2 差异", { exact: true })).toBeVisible();
+  await expect(page.getByText("+ 新策略", { exact: true })).toBeVisible();
+  await expect(page.getByText("- 旧策略", { exact: true })).toBeVisible();
 });

@@ -4,6 +4,7 @@ import type {
   AuthUser,
   ArtifactVersion,
   ArtifactVersionContent,
+  ArtifactVersionDiff,
   BidArtifact,
   BidWorkflowStreamEvent,
   BidWorkflow,
@@ -375,6 +376,16 @@ export function getBidArtifactVersion(workflowId: string, artifactName: string, 
   return request<ArtifactVersionContent>(`/api/v1/bid-workflows/${workflowId}/artifacts/${encodeURIComponent(artifactName)}/versions/${version}`);
 }
 
+export function getBidArtifactVersionDiff(
+  workflowId: string,
+  artifactName: string,
+  baseVersion: number,
+  compareVersion: number,
+): Promise<ArtifactVersionDiff> {
+  const query = new URLSearchParams({ base_version: String(baseVersion), compare_version: String(compareVersion) });
+  return request<ArtifactVersionDiff>(`/api/v1/bid-workflows/${workflowId}/artifacts/${encodeURIComponent(artifactName)}/versions/diff?${query}`);
+}
+
 export function restoreBidArtifactVersion(workflowId: string, artifactName: string, version: number): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>(`/api/v1/bid-workflows/${workflowId}/artifacts/${encodeURIComponent(artifactName)}/versions/${version}/restore`, { method: "POST" });
 }
@@ -384,6 +395,18 @@ export function updateBidArtifactContent(workflowId: string, artifactName: strin
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
+  });
+}
+
+export function rewriteBidArtifactSection(
+  workflowId: string,
+  artifactName: string,
+  input: { heading: string; instruction: string },
+): Promise<BidArtifact> {
+  return request<BidArtifact>(`/api/v1/bid-workflows/${workflowId}/artifacts/${encodeURIComponent(artifactName)}/rewrite-section`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
   });
 }
 

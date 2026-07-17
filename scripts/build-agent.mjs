@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { cpSync, existsSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -62,6 +62,38 @@ if (!existsSync(venvPythonPath())) {
 
 const venvPython = venvPythonPath();
 
+function readDocConverterConfig() {
+  const source = process.env.DOC_CONVERTER_DIR?.trim();
+  const executable = process.env.DOC_CONVERTER_EXECUTABLE?.trim();
+  if (!source || !executable) {
+    if (process.env.REQUIRE_DOC_CONVERTER === "true") {
+      throw new Error("正式打包必须设置 DOC_CONVERTER_DIR 与 DOC_CONVERTER_EXECUTABLE，以随应用分发 LibreOffice headless 转换组件。");
+    }
+    console.warn("Skipping bundled DOC converter. Development mode will use an available system converter.");
+    return null;
+  }
+  if (isAbsolute(executable) || executable.split(/[\\/]/).includes("..")) {
+    throw new Error("DOC_CONVERTER_EXECUTABLE 必须是相对于 DOC_CONVERTER_DIR 的安全路径。");
+  }
+  const sourceDir = resolve(source);
+  const executablePath = resolve(sourceDir, executable);
+  if (!existsSync(executablePath)) {
+    throw new Error(`未找到 DOC 转换器可执行文件：${executablePath}`);
+  }
+  return { executable, sourceDir };
+}
+
+function stageDocConverter(config) {
+  if (!config) return;
+  const { executable, sourceDir } = config;
+  const targetDir = join(agentOutputDir, "doc-converter");
+  rmSync(targetDir, { recursive: true, force: true });
+  cpSync(sourceDir, targetDir, { recursive: true });
+  writeFileSync(join(targetDir, "converter.json"), `${JSON.stringify({ executable })}\n`, "utf8");
+}
+
+const docConverter = readDocConverterConfig();
+
 console.log("Installing backend packaging dependencies...");
 run(venvPython, ["-m", "pip", "install", "--upgrade", "pip"]);
 run(venvPython, ["-m", "pip", "install", "-r", requirementsFile]);
@@ -79,3 +111,4 @@ run(venvPython, [
   ".agent-build",
   "--noconfirm",
 ]);
+stageDocConverter(docConverter);

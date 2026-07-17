@@ -35,6 +35,7 @@ from ..schemas import (
     WorkbenchProjectUpdate,
 )
 from .credentials import CredentialStoreUnavailable, credential_store
+from .artifacts import markdown_line_diff
 DEFAULT_PROJECT_TITLE = "默认项目"
 MULTI_TENANT_SCHEMA_VERSION = 3
 SCHEMA_VERSION = 5
@@ -956,6 +957,18 @@ class WorkbenchStore:
         if not row:
             raise KeyError(version)
         return dict(row)
+
+    def get_bid_artifact_version_diff(self, user_id: str, workflow_id: str, name: str, base_version: int, compare_version: int) -> dict[str, Any]:
+        if base_version == compare_version:
+            raise ValueError("请选择两个不同的版本进行对比。")
+        base = self.get_bid_artifact_version(user_id, workflow_id, name, base_version)
+        compare = self.get_bid_artifact_version(user_id, workflow_id, name, compare_version)
+        return {
+            "name": name,
+            "base_version": base_version,
+            "compare_version": compare_version,
+            "lines": markdown_line_diff(base["content"], compare["content"]),
+        }
 
     def update_bid_artifact_content(self, user_id: str, workflow_id: str, name: str, content: str) -> ArtifactInfo:
         workflow = self.get_bid_workflow(user_id, workflow_id)

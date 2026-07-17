@@ -1,6 +1,9 @@
 import io
+import json
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import zipfile
 from functools import lru_cache
@@ -178,7 +181,7 @@ def _parse_xlsx(content: bytes) -> str:
 def _parse_legacy_doc(content: bytes) -> str:
     converter = _find_legacy_doc_converter()
     if converter is None:
-        raise ValueError("旧版 DOC 解析需要 LibreOffice。请安装 LibreOffice 后重试，或先转换为 DOCX。")
+        raise ValueError("当前应用未包含 DOC 转换组件。请联系应用提供方重新打包，或先转换为 DOCX。")
 
     try:
         with tempfile.TemporaryDirectory(prefix="bid-doc-") as temp_dir:
@@ -211,8 +214,37 @@ def _parse_legacy_doc(content: bytes) -> str:
 
 
 def _find_legacy_doc_converter() -> str | None:
+    configured = os.getenv("AI_WORKBENCH_DOC_CONVERTER", "").strip()
+    if configured and Path(configured).is_file():
+        return configured
+    bundled = _bundled_legacy_doc_converter()
+    if bundled:
+        return bundled
+    if getattr(sys, "frozen", False):
+        return None
     for command in ("soffice", "libreoffice", "textutil"):
         path = shutil.which(command)
         if path:
             return path
     return None
+
+
+def _agent_resource_dir() -> Path:
+    return Path(sys.executable).resolve().parent
+
+
+def _bundled_legacy_doc_converter() -> str | None:
+    root = _agent_resource_dir() / "doc-converter"
+    manifest = root / "converter.json"
+    try:
+        executable = json.loads(manifest.read_text(encoding="utf-8")).get("executable", "")
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(executable, str) or not executable or Path(executable).is_absolute():
+        return None
+    candidate = (root / executable).resolve()
+    try:
+        candidate.relative_to(root.resolve())
+    except ValueError:
+        return None
+    return str(candidate) if candidate.is_file() else None

@@ -16,7 +16,7 @@ function command(name) {
   return process.platform === "win32" ? `${name}.cmd` : name;
 }
 
-function run(cmd, args) {
+function run(cmd, args, env = process.env) {
   // 仅 .cmd/.bat 文件需要 shell；直接使用 .exe 时开启 shell 会导致
   // "C:\Program Files\..." 等含空格路径被错误截断
   const needsShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(cmd);
@@ -24,7 +24,7 @@ function run(cmd, args) {
     cwd: projectRoot,
     stdio: "inherit",
     shell: needsShell,
-    env: process.env,
+    env,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) process.exit(result.status ?? 1);
@@ -88,7 +88,7 @@ try {
 
   run(process.execPath, ["scripts/sync-version.mjs"]);
   run(command("npm"), ["run", "build"]);
-  run(command("npm"), ["run", "build:agent"]);
+  run(command("npm"), ["run", "build:agent"], { ...process.env, REQUIRE_DOC_CONVERTER: "true" });
   run(process.execPath, ["scripts/run-electron-builder.mjs", ...builderArgs]);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));

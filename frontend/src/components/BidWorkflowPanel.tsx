@@ -1,10 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Download, History, Loader2, Pencil, RotateCcw, Save, X } from "lucide-react";
+import { CheckCircle2, Download, History, Loader2, Pencil, RotateCcw, Save, WandSparkles, X } from "lucide-react";
 
-import { getBidArtifactVersion, listBidArtifactVersions, restoreBidArtifactVersion, updateBidArtifactContent } from "@/lib/api";
+import { getBidArtifactVersion, getBidArtifactVersionDiff, listBidArtifactVersions, restoreBidArtifactVersion, rewriteBidArtifactSection, updateBidArtifactContent } from "@/lib/api";
 import type { BidArtifact, BidWorkflow } from "@/lib/types";
 import styles from "./BidWorkflowPanel.module.css";
 
@@ -54,6 +54,8 @@ function formatVersionTime(value: string): string {
 function ArtifactVersionPanel({ workflowId, artifact, onRefresh }: { workflowId: string; artifact: BidArtifact; onRefresh: () => Promise<void> }) {
   const queryClient = useQueryClient();
   const [selectedVersion, setSelectedVersion] = useState<number | null>(null);
+  const [baseVersion, setBaseVersion] = useState<number | null>(null);
+  const [compareVersion, setCompareVersion] = useState<number | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [draftContent, setDraftContent] = useState("");
   const versionsQuery = useQuery({
@@ -65,6 +67,17 @@ function ArtifactVersionPanel({ workflowId, artifact, onRefresh }: { workflowId:
     queryFn: () => getBidArtifactVersion(workflowId, artifact.name, selectedVersion!),
     enabled: selectedVersion !== null,
   });
+  const diffQuery = useQuery({
+    queryKey: ["artifact-version-diff", workflowId, artifact.name, baseVersion, compareVersion],
+    queryFn: () => getBidArtifactVersionDiff(workflowId, artifact.name, baseVersion!, compareVersion!),
+    enabled: baseVersion !== null && compareVersion !== null && baseVersion !== compareVersion,
+  });
+  useEffect(() => {
+    const versions = versionsQuery.data ?? [];
+    if (versions.length < 2) return;
+    setBaseVersion((current) => current ?? versions[1].version);
+    setCompareVersion((current) => current ?? versions[0].version);
+  }, [versionsQuery.data]);
   const restoreMutation = useMutation({
     mutationFn: () => restoreBidArtifactVersion(workflowId, artifact.name, selectedVersion!),
     onSuccess: async () => {
@@ -81,7 +94,8 @@ function ArtifactVersionPanel({ workflowId, artifact, onRefresh }: { workflowId:
       await onRefresh();
     },
   });
-  const error = versionsQuery.error ?? contentQuery.error ?? restoreMutation.error ?? saveMutation.error;
+  const error = versionsQuery.error ?? contentQuery.error ?? diffQuery.error ?? restoreMutation.error ?? saveMutation.error;
+  const versions = versionsQuery.data ?? [];
 
   return (
     <section className={styles.versionPanel} aria-label={`${artifact.name} 版本记录`}>
@@ -91,7 +105,7 @@ function ArtifactVersionPanel({ workflowId, artifact, onRefresh }: { workflowId:
       </div>
       {versionsQuery.isLoading ? <div className="workflow-note">正在读取版本记录…</div> : (
         <div className={styles.versionList} role="list">
-          {(versionsQuery.data ?? []).map((item) => (
+          {versions.map((item) => (
             <button
               type="button"
               key={item.version}
@@ -106,7 +120,29 @@ function ArtifactVersionPanel({ workflowId, artifact, onRefresh }: { workflowId:
           ))}
         </div>
       )}
+      {versions.length >= 2 && (
+        <div className={styles.diffControls}>
+          <label>
+            基准版本
+            <select value={baseVersion ?? ""} onChange={(event) => setBaseVersion(Number(event.target.value))} aria-label={`${artifact.name} 基准版本`}>
+              {versions.map((item) => <option key={item.version} value={item.version}>v{item.version}</option>)}
+            </select>
+          </label>
+          <label>
+            对比版本
+            <select value={compareVersion ?? ""} onChange={(event) => setCompareVersion(Number(event.target.value))} aria-label={`${artifact.name} 对比版本`}>
+              {versions.map((item) => <option key={item.version} value={item.version}>v{item.version}</option>)}
+            </select>
+          </label>
+        </div>
+      )}
       {error && <div className="workflow-error">{error instanceof Error ? error.message : String(error)}</div>}
+      {diffQuery.data && (
+        <section className={styles.diffPanel} aria-label={`${artifact.name} 版本差异`}>
+          <strong>v{diffQuery.data.base_version} → v{diffQuery.data.compare_version} 差异</strong>
+          <pre>{diffQuery.data.lines.map((line, index) => <span className={line.kind === "added" ? styles.diffAdded : line.kind === "removed" ? styles.diffRemoved : styles.diffUnchanged} key={`${line.kind}-${index}`}>{line.kind === "added" ? "+ " : line.kind === "removed" ? "- " : "  "}{line.content || " "}{"\n"}</span>)}</pre>
+        </section>
+      )}
       {contentQuery.data && (
         <div className={styles.versionPreview}>
           <div className={styles.versionPreviewHeader}>
@@ -146,6 +182,49 @@ function ArtifactVersionPanel({ workflowId, artifact, onRefresh }: { workflowId:
         </div>
       )}
     </section>
+  );
+}
+
+function ArtifactSectionRewritePanel({ workflowId, artifact, onRefresh }: { workflowId: string; artifact: BidArtifact; onRefresh: () => Promise<void> }) {
+  const queryClient = useQueryClient();
+  const [isOpen, setIsOpen] = useState(false);
+  const [heading, setHeading] = useState("");
+  const [instruction, setInstruction] = useState("");
+  const rewriteMutation = useMutation({
+    mutationFn: () => rewriteBidArtifactSection(workflowId, artifact.name, { heading: heading.trim(), instruction: instruction.trim() }),
+    onSuccess: async () => {
+      setInstruction("");
+      setIsOpen(false);
+      await queryClient.invalidateQueries({ queryKey: ["artifact-versions", workflowId, artifact.name] });
+      await onRefresh();
+    },
+  });
+  const canSubmit = heading.trim().length > 0 && instruction.trim().length > 0 && !rewriteMutation.isPending;
+
+  return (
+    <>
+      <button type="button" className={styles.versionButton} onClick={() => setIsOpen((current) => !current)} aria-expanded={isOpen}>
+        <WandSparkles size={14} />
+        <span>AI 改章节</span>
+      </button>
+      {isOpen && (
+        <form className={styles.rewritePanel} onSubmit={(event) => { event.preventDefault(); if (canSubmit) rewriteMutation.mutate(); }}>
+          <label>
+            章节标题
+            <input value={heading} onChange={(event) => setHeading(event.target.value)} placeholder="例如：总体设计策略" aria-label={`${artifact.name} 章节标题`} />
+          </label>
+          <label>
+            修改要求
+            <textarea value={instruction} onChange={(event) => setInstruction(event.target.value)} rows={3} placeholder="说明需要保留、补充或调整的内容" aria-label={`${artifact.name} 章节修改要求`} />
+          </label>
+          {rewriteMutation.error && <div className="workflow-error">{rewriteMutation.error instanceof Error ? rewriteMutation.error.message : String(rewriteMutation.error)}</div>}
+          <div className={styles.rewriteActions}>
+            <button type="button" onClick={() => setIsOpen(false)} disabled={rewriteMutation.isPending}>取消</button>
+            <button type="submit" disabled={!canSubmit}>{rewriteMutation.isPending ? "正在重写…" : "仅重写此章节"}</button>
+          </div>
+        </form>
+      )}
+    </>
   );
 }
 
@@ -267,6 +346,7 @@ export function BidWorkflowPanel({
                 <History size={14} />
                 <span>版本</span>
               </button>
+              <ArtifactSectionRewritePanel workflowId={workflow.id} artifact={artifact} onRefresh={onRefresh} />
             </div>
           )) : <div className="workflow-note">阶段二已完成，正在等待成果文件同步。</div>}
           {versionArtifact && <ArtifactVersionPanel key={versionArtifact.name} workflowId={workflow.id} artifact={versionArtifact} onRefresh={onRefresh} />}

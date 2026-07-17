@@ -11,7 +11,7 @@ from docx import Document
 from openpyxl import Workbook
 
 from backend.schemas import ApiConfig, WebSearchConfig
-from backend.services.artifacts import build_output_files, extract_section, has_confirmed_content, infer_project_name, make_zip
+from backend.services.artifacts import build_output_files, extract_section, find_markdown_section, has_confirmed_content, infer_project_name, make_zip, markdown_line_diff, replace_markdown_section
 from backend.services import document_parser
 from backend.services.document_chunks import split_document_text
 from backend.services.document_parser import parse_document
@@ -63,6 +63,20 @@ def test_parse_legacy_doc_uses_converter(monkeypatch):
     assert parse_document("招标.doc", document_parser.DOC_SIGNATURE + b"legacy") == "项目名称：DOC 项目"
 
 
+def test_bundled_legacy_doc_converter_is_preferred_in_frozen_agent(tmp_path, monkeypatch):
+    converter_dir = tmp_path / "doc-converter"
+    converter_dir.mkdir()
+    converter = converter_dir / "program" / "soffice"
+    converter.parent.mkdir()
+    converter.write_text("", encoding="utf-8")
+    (converter_dir / "converter.json").write_text(json.dumps({"executable": "program/soffice"}), encoding="utf-8")
+    monkeypatch.setattr(document_parser, "_agent_resource_dir", lambda: tmp_path)
+    monkeypatch.setattr(document_parser.sys, "frozen", True, raising=False)
+    monkeypatch.delenv("AI_WORKBENCH_DOC_CONVERTER", raising=False)
+
+    assert document_parser._find_legacy_doc_converter() == str(converter.resolve())
+
+
 def test_split_document_text_preserves_content_at_section_boundaries():
     text = "前言\n\n--- 第 1 页 ---\n" + "内容" * 9 + "\n\n--- 第 2 页 ---\n尾部要求"
 
@@ -71,6 +85,29 @@ def test_split_document_text_preserves_content_at_section_boundaries():
     assert "".join(chunks) == text
     assert all(len(chunk) <= 24 for chunk in chunks)
     assert any("尾部要求" in chunk for chunk in chunks)
+
+
+def test_replacing_markdown_section_keeps_other_sections_unchanged():
+    content = "# 方案正文\n\n## 总体策略\n旧策略\n\n### 子项\n旧子项\n\n## 服务计划\n保持不变"
+
+    section = find_markdown_section(content, "总体策略")
+    revised = replace_markdown_section(content, section, "新策略\n\n### 子项\n新子项")
+
+    assert section.body == "旧策略\n\n### 子项\n旧子项"
+    assert "## 总体策略\n\n新策略" in revised
+    assert "## 服务计划\n保持不变" in revised
+    assert "旧策略" not in revised
+
+
+def test_markdown_line_diff_marks_added_removed_and_unchanged_lines():
+    lines = markdown_line_diff("# 标题\n旧内容\n保留内容", "# 标题\n新内容\n保留内容")
+
+    assert lines == [
+        {"kind": "unchanged", "content": "# 标题"},
+        {"kind": "removed", "content": "旧内容"},
+        {"kind": "added", "content": "新内容"},
+        {"kind": "unchanged", "content": "保留内容"},
+    ]
 
 
 def test_xlsx_signature_error():

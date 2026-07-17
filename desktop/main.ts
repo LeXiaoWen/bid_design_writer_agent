@@ -134,7 +134,11 @@ function startBackend(): Promise<void> {
   };
 
   if (app.isPackaged && packagedAgentPath) {
-    backendProcess = spawn(packagedAgentPath, [], { detached: process.platform !== "win32", env });
+    backendProcess = spawn(packagedAgentPath, [], {
+      detached: process.platform !== "win32",
+      env,
+      windowsHide: true,
+    });
   } else {
     const pythonCmd = process.platform === "win32" ? "python" : "python3";
     const projectRoot = path.resolve(__dirname, "..");
