@@ -82,12 +82,9 @@ def login_user(username: str, password: str) -> AuthLoginResponse:
     if _hasher.check_needs_rehash(row["password_hash"]):
         workbench_store.update_user_password_hash(row["id"], _hasher.hash(password))
 
-    try:
-        workbench_store.migrate_legacy_secrets_on_login(row["id"], password)
-    except Exception:
-        # Authentication must remain available even if an old machine has no keychain.
-        # The migration has already created a password-encrypted recovery artifact.
-        logger.warning("credential migration was deferred", extra={"user_id": row["id"]}, exc_info=True)
+    workbench_store.unlock_credential_vault(row["id"], password)
+    workbench_store.migrate_legacy_secrets_on_login(row["id"], password)
+    workbench_store.sync_credential_status(row["id"])
 
     token = secrets.token_urlsafe(32)
     expires_at = _expires_at()
@@ -99,12 +96,16 @@ def login_user(username: str, password: str) -> AuthLoginResponse:
 def user_from_token(token: str | None) -> AuthUser | None:
     if not token:
         return None
-    return workbench_store.get_auth_session_user(_hash_token(token), utc_now())
+    user = workbench_store.get_auth_session_user(_hash_token(token), utc_now())
+    return user if user and workbench_store.credential_vault_is_unlocked(user.id) else None
 
 
 def logout_token(token: str | None) -> None:
     if token:
+        user = workbench_store.get_auth_session_user(_hash_token(token), utc_now())
         workbench_store.revoke_auth_session(_hash_token(token))
+        if user and not workbench_store.has_active_auth_sessions(user.id, utc_now()):
+            workbench_store.lock_credential_vault(user.id)
 
 
 def change_password(user: AuthUser, current_password: str, new_password: str) -> None:
@@ -117,4 +118,6 @@ def change_password(user: AuthUser, current_password: str, new_password: str) ->
         verified = False
     if not verified:
         raise ValueError("当前密码错误。")
+    workbench_store.rotate_credential_vault(user.id, current_password, new_password)
     workbench_store.update_user_password_hash(user.id, _hasher.hash(new_password))
+    workbench_store.lock_credential_vault(user.id)

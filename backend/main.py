@@ -1,6 +1,7 @@
 from datetime import datetime
 import asyncio
 import json
+import logging
 import os
 import re
 import threading
@@ -25,11 +26,10 @@ from .services.behavior_report import save_behavior_report
 from .services.bid_jobs import BidJobWorker
 from .services.bid_streams import bid_workflow_streams
 from .services.config import API_PRESETS
-from .services.credentials import CredentialStoreUnavailable
 from .services.document_chunks import DOCUMENT_CHUNK_CHARACTER_BUDGET, split_document_text
 from .services.document_parser import parse_document
 from .services.llm import run_agent
-from .services.logging_config import configure_logging
+from .services.logging_config import configure_logging, redact_log_text
 from .services.skill_loader import (
     build_stage1_instructions,
     build_stage2_instructions,
@@ -49,6 +49,7 @@ configure_logging()
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 CHUNK_NOTE_CHARACTER_LIMIT = 4_000
+logger = logging.getLogger("bid_design_writer.workflow")
 
 
 def get_cors_origins() -> list[str]:
@@ -74,10 +75,6 @@ app.include_router(projects_router)
 app.include_router(config_router)
 app.include_router(chat_router)
 
-
-@app.exception_handler(CredentialStoreUnavailable)
-async def credential_store_unavailable(_: Request, exc: CredentialStoreUnavailable):
-    return JSONResponse(status_code=503, content={"detail": str(exc), "code": "credential_store_unavailable"})
 
 PUBLIC_API_V1_PATHS = {
     "/api/v1/auth/status",
@@ -189,8 +186,7 @@ async def stream_bid_workflow_events(user_id: str, workflow_id: str) -> AsyncIte
     workflow = workbench_store.get_bid_workflow(user_id, workflow_id)
     subscriber = bid_workflow_streams.subscribe(workflow_id)
     try:
-        messages = workbench_store.list_messages(user_id, workflow.conversation_id)
-        message = next((item for item in reversed(messages) if item.role == "assistant" and item.status == "streaming"), None)
+        message = workbench_store.get_bid_streaming_message(user_id, workflow_id)
         if message:
             yield sse_event("message_start", bid_message_start_payload(message))
             if message.content:
@@ -390,6 +386,7 @@ def run_bid_extraction_task(user_id: str, workflow_id: str, job_id: str | None =
         if job_id:
             stream_usage = bid_usage(instructions, prompt)
             assistant_message = workbench_store.add_message(user_id, workflow.conversation_id, "assistant", "", status="streaming", model=api_config.model, usage=stream_usage)
+            workbench_store.attach_bid_job_message(job_id, user_id, workflow_id, assistant_message.id)
             bid_workflow_streams.publish(workflow_id, "message_start", bid_message_start_payload(assistant_message))
             result = run_bid_agent_stream(
                 user_id,
@@ -420,13 +417,27 @@ def run_bid_extraction_task(user_id: str, workflow_id: str, job_id: str | None =
         else:
             workbench_store.add_message(user_id, saved.conversation_id, "assistant", content)
     except Exception as exc:
-        failed = workbench_store.update_bid_workflow_status(user_id, workflow_id, BidWorkflowStatus.FAILED, error=str(exc))
+        if workflow_is_cancelled(user_id, workflow_id):
+            if assistant_message:
+                partial_content = workbench_store.get_message(user_id, assistant_message.id).content
+                saved_message = workbench_store.update_message(
+                    user_id,
+                    assistant_message.id,
+                    partial_content,
+                    "interrupted",
+                    finish_reason="cancelled",
+                    usage=stream_usage,
+                )
+                publish_bid_message_done(workflow_id, saved_message, partial_content, "interrupted")
+            return
+        error = redact_log_text(str(exc))
+        failed = workbench_store.update_bid_workflow_status(user_id, workflow_id, BidWorkflowStatus.FAILED, error=error)
         if assistant_message:
             partial_content = workbench_store.get_message(user_id, assistant_message.id).content
-            saved_message = workbench_store.update_message(user_id, assistant_message.id, partial_content, "error", usage=stream_usage, error=str(exc))
-            publish_bid_message_done(workflow_id, saved_message, partial_content, "error", str(exc))
+            saved_message = workbench_store.update_message(user_id, assistant_message.id, partial_content, "error", usage=stream_usage, error=error)
+            publish_bid_message_done(workflow_id, saved_message, partial_content, "error", error)
         else:
-            workbench_store.add_message(user_id, failed.conversation_id, "assistant", f"阶段一提取失败：{exc}", status="error", error=str(exc))
+            workbench_store.add_message(user_id, failed.conversation_id, "assistant", f"阶段一提取失败：{error}", status="error", error=error)
 
 
 def run_bid_generation_task(user_id: str, workflow_id: str, job_id: str | None = None) -> None:
@@ -454,6 +465,7 @@ def run_bid_generation_task(user_id: str, workflow_id: str, job_id: str | None =
         if job_id:
             stream_usage = bid_usage(instructions, prompt)
             assistant_message = workbench_store.add_message(user_id, workflow.conversation_id, "assistant", "", status="streaming", model=api_config.model, usage=stream_usage)
+            workbench_store.attach_bid_job_message(job_id, user_id, workflow_id, assistant_message.id)
             bid_workflow_streams.publish(workflow_id, "message_start", bid_message_start_payload(assistant_message))
             result = run_bid_agent_stream(user_id, workflow_id, workflow.conversation_id, assistant_message.id, job_id, "阶段二", api_config, instructions, prompt)
         else:
@@ -470,8 +482,8 @@ def run_bid_generation_task(user_id: str, workflow_id: str, job_id: str | None =
         completed = workbench_store.get_bid_workflow(user_id, workflow_id)
         try:
             save_behavior_report(user_id, completed.id)
-        except Exception as report_exc:
-            print(f"[behavior-report] failed to save report for {completed.id}: {report_exc}")
+        except Exception:
+            logger.warning("failed to save behavior report", extra={"workflow_id": completed.id}, exc_info=True)
         content = f"{result}\n\n生成完成，可下载 Markdown 文件或 ZIP 包。"
         if assistant_message:
             saved_message = workbench_store.update_message(user_id, assistant_message.id, content, "completed", usage=bid_usage(instructions, prompt, result))
@@ -479,13 +491,27 @@ def run_bid_generation_task(user_id: str, workflow_id: str, job_id: str | None =
         else:
             workbench_store.add_message(user_id, completed.conversation_id, "assistant", content)
     except Exception as exc:
-        failed = workbench_store.update_bid_workflow_status(user_id, workflow_id, BidWorkflowStatus.FAILED, error=str(exc))
+        if workflow_is_cancelled(user_id, workflow_id):
+            if assistant_message:
+                partial_content = workbench_store.get_message(user_id, assistant_message.id).content
+                saved_message = workbench_store.update_message(
+                    user_id,
+                    assistant_message.id,
+                    partial_content,
+                    "interrupted",
+                    finish_reason="cancelled",
+                    usage=stream_usage,
+                )
+                publish_bid_message_done(workflow_id, saved_message, partial_content, "interrupted")
+            return
+        error = redact_log_text(str(exc))
+        failed = workbench_store.update_bid_workflow_status(user_id, workflow_id, BidWorkflowStatus.FAILED, error=error)
         if assistant_message:
             partial_content = workbench_store.get_message(user_id, assistant_message.id).content
-            saved_message = workbench_store.update_message(user_id, assistant_message.id, partial_content, "error", usage=stream_usage, error=str(exc))
-            publish_bid_message_done(workflow_id, saved_message, partial_content, "error", str(exc))
+            saved_message = workbench_store.update_message(user_id, assistant_message.id, partial_content, "error", usage=stream_usage, error=error)
+            publish_bid_message_done(workflow_id, saved_message, partial_content, "error", error)
         else:
-            workbench_store.add_message(user_id, failed.conversation_id, "assistant", f"阶段二生成失败：{exc}", status="error", error=str(exc))
+            workbench_store.add_message(user_id, failed.conversation_id, "assistant", f"阶段二生成失败：{error}", status="error", error=error)
 
 
 def run_bid_job(job_id: str, user_id: str, workflow_id: str, kind: str) -> None:
@@ -503,7 +529,7 @@ bid_job_worker = BidJobWorker(run_bid_job)
 
 @app.on_event("startup")
 def start_bid_job_worker() -> None:
-    if os.getenv("AI_WORKBENCH_TEST_CREDENTIALS") != "1":
+    if os.getenv("AI_WORKBENCH_TEST_MODE") != "1":
         bid_job_worker.start()
 
 
@@ -514,7 +540,7 @@ def stop_bid_job_worker() -> None:
 
 def enqueue_bid_job(user_id: str, workflow_id: str, kind: str) -> BidWorkflow:
     workflow = workbench_store.enqueue_bid_job(user_id, workflow_id, kind)
-    if os.getenv("AI_WORKBENCH_TEST_CREDENTIALS") == "1":
+    if os.getenv("AI_WORKBENCH_TEST_MODE") == "1":
         bid_job_worker.run_pending()
     else:
         bid_job_worker.notify()

@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 os.environ["AI_WORKBENCH_DB_PATH"] = str(Path(tempfile.gettempdir()) / f"ai-workbench-test-{uuid4()}.db")
 os.environ["APP_AUTH_SECRET"] = "test-app-secret"
-os.environ["AI_WORKBENCH_TEST_CREDENTIALS"] = "1"
+os.environ["AI_WORKBENCH_TEST_MODE"] = "1"
 
 from backend.main import app
 from backend.schemas import BidExecutionState, BidWorkflowStatus, ProviderModel
@@ -328,6 +328,7 @@ def test_legacy_database_migrates_existing_data_to_its_only_user(tmp_path):
 
     migrated = WorkbenchStore(legacy_path)
     assert migrated.get_project("legacy-user", "legacy-project").title == "历史项目"
+    migrated.unlock_credential_vault("legacy-user", "test-password")
     migrated.migrate_legacy_secrets_on_login("legacy-user", "test-password")
     assert migrated.resolve_api_key("legacy-user", "legacy-profile") == "legacy-secret"
     assert migrated._execute("SELECT api_key FROM provider_profiles WHERE id = 'legacy-profile'").fetchone()["api_key"] is None
@@ -759,6 +760,23 @@ def test_bid_workflow_cancel_prevents_late_extraction_save(monkeypatch):
     assert cancelled.extracted_markdown == ""
 
 
+def test_bid_workflow_cancel_prevents_late_extraction_error_write(monkeypatch):
+    workflow_id = _create_completed_bid_workflow()
+    workbench_store.update_bid_workflow_status(TEST_USER_ID, workflow_id, BidWorkflowStatus.EXTRACTING)
+
+    def fake_run_agent(api_config, instructions, prompt):
+        workbench_store.update_bid_workflow_status(TEST_USER_ID, workflow_id, BidWorkflowStatus.CANCELLED)
+        raise RuntimeError("模型连接中断")
+
+    monkeypatch.setattr("backend.main.run_agent", fake_run_agent)
+
+    from backend.main import run_bid_extraction_task
+
+    run_bid_extraction_task(TEST_USER_ID, workflow_id)
+
+    assert workbench_store.get_bid_workflow(TEST_USER_ID, workflow_id).status == BidWorkflowStatus.CANCELLED
+
+
 def test_interrupted_bid_job_is_recovered_and_completed_by_worker():
     project_id = client.post("/api/v1/projects", json={"title": "任务恢复项目"}).json()["id"]
     conversation_id = client.post(
@@ -795,6 +813,25 @@ def test_interrupted_bid_job_is_recovered_and_completed_by_worker():
     assert completed is not None
     assert completed.state == BidExecutionState.COMPLETED
     assert completed.progress == 100
+
+
+def test_recover_bid_job_interrupts_its_streaming_message_without_touching_chat_stream():
+    workflow_id = _create_completed_bid_workflow()
+    workflow = workbench_store.get_bid_workflow(TEST_USER_ID, workflow_id)
+    workbench_store.update_bid_workflow_status(TEST_USER_ID, workflow_id, BidWorkflowStatus.EXTRACTING)
+    workbench_store.enqueue_bid_job(TEST_USER_ID, workflow_id, "extraction")
+    job = workbench_store.claim_next_bid_job()
+    assert job is not None
+    chat_message = workbench_store.add_message(TEST_USER_ID, workflow.conversation_id, "assistant", "聊天输出", status="streaming")
+    workflow_message = workbench_store.add_message(TEST_USER_ID, workflow.conversation_id, "assistant", "阶段一输出", status="streaming")
+    workbench_store.attach_bid_job_message(job["id"], TEST_USER_ID, workflow_id, workflow_message.id)
+
+    assert workbench_store.get_bid_streaming_message(TEST_USER_ID, workflow_id).id == workflow_message.id
+    workbench_store.recover_bid_jobs()
+
+    assert workbench_store.get_message(TEST_USER_ID, workflow_message.id).status == "interrupted"
+    assert workbench_store.get_message(TEST_USER_ID, chat_message.id).status == "streaming"
+    assert workbench_store.get_bid_streaming_message(TEST_USER_ID, workflow_id) is None
 
 
 def test_bid_job_recovery_fails_after_second_interruption():
@@ -902,6 +939,23 @@ def test_bid_workflow_cancel_prevents_late_generation_save(monkeypatch):
     cancelled = workbench_store.get_bid_workflow(TEST_USER_ID, workflow_id)
     assert cancelled.status == BidWorkflowStatus.CANCELLED
     assert workbench_store.get_bid_artifact_content(TEST_USER_ID, workflow_id, "行为摘要测试项目_设计方案.md") == "# 设计方案"
+
+
+def test_bid_workflow_cancel_prevents_late_generation_error_write(monkeypatch):
+    workflow_id = _create_completed_bid_workflow()
+    workbench_store.update_bid_workflow_status(TEST_USER_ID, workflow_id, BidWorkflowStatus.GENERATING)
+
+    def fake_run_agent(api_config, instructions, prompt):
+        workbench_store.update_bid_workflow_status(TEST_USER_ID, workflow_id, BidWorkflowStatus.CANCELLED)
+        raise RuntimeError("模型连接中断")
+
+    monkeypatch.setattr("backend.main.run_agent", fake_run_agent)
+
+    from backend.main import run_bid_generation_task
+
+    run_bid_generation_task(TEST_USER_ID, workflow_id)
+
+    assert workbench_store.get_bid_workflow(TEST_USER_ID, workflow_id).status == BidWorkflowStatus.CANCELLED
 
 
 def test_bid_workflow_cancel_endpoint_rejects_completed_workflow():

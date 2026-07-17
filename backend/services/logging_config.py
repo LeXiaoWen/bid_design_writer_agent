@@ -10,8 +10,9 @@ from .workbench_store import data_dir
 
 
 def redact_log_text(text: str) -> str:
-    redacted = re.sub(r"(?i)(api[_-]?key|token|password|secret)\s*[:=]\s*[^\s]+", r"\1=[已脱敏]", text)
-    redacted = re.sub(r"Bearer\s+[A-Za-z0-9._-]{12,}", "Bearer [已脱敏]", redacted)
+    redacted = re.sub(r"(?i)([\"']?(?:api[_-]?key|token|password|secret)[\"']?)\s*[:=]\s*[\"']?[^\s,}\"']+", r"\1=[已脱敏]", text)
+    redacted = re.sub(r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,}]+", r"\1[已脱敏]", redacted)
+    redacted = re.sub(r"(?i)Bearer\s+[A-Za-z0-9._-]{12,}", "Bearer [已脱敏]", redacted)
     return re.sub(r"sk-[A-Za-z0-9_-]{12,}", "[已脱敏 API key]", redacted)
 
 

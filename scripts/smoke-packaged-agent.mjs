@@ -211,7 +211,7 @@ async function smokeAgent() {
       AGENT_PORT: "0",
       APP_AUTH_SECRET: "packaged-agent-smoke",
       AI_WORKBENCH_DATA_DIR: join(dataRoot, "data"),
-      AI_WORKBENCH_TEST_CREDENTIALS: "1",
+      AI_WORKBENCH_TEST_MODE: "1",
       HOME: dataRoot,
       LLVM_PROFILE_FILE: join(dataRoot, "default.profraw"),
     },

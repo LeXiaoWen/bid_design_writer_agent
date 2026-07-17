@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -14,6 +16,9 @@ from ..schemas import (
 )
 from ..services.workbench_store import workbench_store
 from .dependencies import current_user
+
+
+logger = logging.getLogger("bid_design_writer.bid_workflows")
 
 
 def create_router(
@@ -47,7 +52,7 @@ def create_router(
         file_name = file.filename or "uploaded"
         try:
             content = await read_upload_with_limit(file)
-            file_text = parse_document(file_name, content)
+            file_text = await asyncio.to_thread(parse_document, file_name, content)
             workflow = workbench_store.create_bid_workflow(user_id, conversation_id, file_name, file_text, provider_profile_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -116,8 +121,8 @@ def create_router(
         workbench_store.add_message(user_id, workflow.conversation_id, "user", payload.text)
         try:
             save_behavior_report(user_id, workflow_id)
-        except Exception as report_exc:
-            print(f"[behavior-report] failed to save report on confirm for {workflow_id}: {report_exc}")
+        except Exception:
+            logger.warning("failed to save behavior report", extra={"workflow_id": workflow_id, "user_id": user_id}, exc_info=True)
         return BidWorkflowActionResponse(workflow=public_bid_workflow(workflow), message="阶段一信息已确认。")
 
     @router.post("/api/v1/bid-workflows/{workflow_id}/generate", response_model=BidWorkflowActionResponse)
@@ -140,8 +145,8 @@ def create_router(
             if payload.extra_context:
                 try:
                     save_behavior_report(user_id, workflow_id)
-                except Exception as report_exc:
-                    print(f"[behavior-report] failed to save report on generate for {workflow_id}: {report_exc}")
+                except Exception:
+                    logger.warning("failed to save behavior report", extra={"workflow_id": workflow_id, "user_id": user_id}, exc_info=True)
             workflow = workbench_store.update_bid_workflow_status(user_id, workflow_id, BidWorkflowStatus.GENERATING)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="标书工作流或模型配置不存在。") from exc

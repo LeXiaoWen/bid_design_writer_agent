@@ -98,8 +98,8 @@ export function ConfigDialog({ open, onOpenChange, presets, profile, onSaveProfi
 
   const isSavingSearch = webSearchForm.formState.isSubmitting;
   const webSearchSource = webSearchConfig?.source;
-  const webSearchStatus = webSearchSource === "system" ? "已配置（系统凭据库）" : webSearchSource === "env" ? "已配置（环境变量）" : "未配置";
-  const webSearchPlaceholder = webSearchSource === "system" ? "留空则保留系统凭据库中的 key" : webSearchSource === "env" ? "填写后保存到本地（替代环境变量）" : "填写 Tavily API key";
+  const webSearchStatus = webSearchSource === "vault" ? "已配置（本地加密凭据库）" : webSearchSource === "env" ? "已配置（环境变量）" : "未配置";
+  const webSearchPlaceholder = webSearchSource === "vault" ? "留空则保留本地加密凭据库中的 key" : webSearchSource === "env" ? "填写后保存到本地（替代环境变量）" : "填写 Tavily API key";
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>

@@ -15,6 +15,11 @@ from PyPDF2 import PdfReader
 
 
 DOC_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+MAX_ARCHIVE_ENTRIES = 4_096
+MAX_ARCHIVE_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
+MAX_ARCHIVE_COMPRESSION_RATIO = 200
+MAX_PDF_PAGES = 300
+MAX_XLSX_ROWS = 100_000
 
 
 def validate_document_signature(filename: str, content: bytes) -> None:
@@ -25,8 +30,16 @@ def validate_document_signature(filename: str, content: bytes) -> None:
         try:
             with zipfile.ZipFile(io.BytesIO(content)) as archive:
                 names = set(archive.namelist())
+                entries = archive.infolist()
         except zipfile.BadZipFile as exc:
             raise ValueError(f"文件扩展名为 {suffix[1:].upper()}，但不是有效的 Office 文档。") from exc
+        if len(entries) > MAX_ARCHIVE_ENTRIES:
+            raise ValueError("Office 文档包含过多压缩条目。")
+        total_size = sum(entry.file_size for entry in entries)
+        if total_size > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
+            raise ValueError("Office 文档解压后过大。")
+        if any(entry.compress_size and entry.file_size / entry.compress_size > MAX_ARCHIVE_COMPRESSION_RATIO for entry in entries):
+            raise ValueError("Office 文档压缩比异常。")
         required_entry = "word/document.xml" if suffix == ".docx" else "xl/workbook.xml"
         if "[Content_Types].xml" not in names or required_entry not in names:
             raise ValueError(f"文件扩展名为 {suffix[1:].upper()}，但文档结构不匹配。")
@@ -61,6 +74,8 @@ def parse_document(filename: str, content: bytes) -> str:
 def _parse_pdf(content: bytes) -> str:
     try:
         reader = PdfReader(io.BytesIO(content))
+        if len(reader.pages) > MAX_PDF_PAGES:
+            raise ValueError(f"PDF 页数不能超过 {MAX_PDF_PAGES} 页。")
         page_texts: dict[int, str] = {}
         pages_to_ocr: list[int] = []
         for index, page in enumerate(reader.pages, start=1):
@@ -102,16 +117,21 @@ def _ocr_pdf_pages(content: bytes, page_numbers: list[int]) -> dict[int, str]:
 
     try:
         document = fitz.open(stream=content, filetype="pdf")
-        engine = _get_ocr_engine()
-        page_texts = {}
-        for page_number in page_numbers:
-            page = document.load_page(page_number - 1)
-            bitmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
-            result = engine(_pixmap_to_image(bitmap))
-            text = _ocr_result_text(result)
-            if text:
-                page_texts[page_number] = text
-        return page_texts
+        try:
+            engine = _get_ocr_engine()
+            page_texts = {}
+            for page_number in page_numbers:
+                page = document.load_page(page_number - 1)
+                bitmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                result = engine(_pixmap_to_image(bitmap))
+                text = _ocr_result_text(result)
+                if text:
+                    page_texts[page_number] = text
+            return page_texts
+        finally:
+            close = getattr(document, "close", None)
+            if close:
+                close()
     except ValueError:
         raise
     except Exception as exc:
@@ -160,9 +180,13 @@ def _parse_xlsx(content: bytes) -> str:
     try:
         workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=False)
         sheet_lines = []
+        row_count = 0
         for worksheet in workbook.worksheets:
             rows = []
             for row in worksheet.iter_rows(values_only=True):
+                row_count += 1
+                if row_count > MAX_XLSX_ROWS:
+                    raise ValueError(f"XLSX 行数不能超过 {MAX_XLSX_ROWS:,} 行。")
                 values = [str(value).strip() if value is not None else "" for value in row]
                 if any(values):
                     rows.append(" | ".join(values))

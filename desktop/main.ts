@@ -58,6 +58,14 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isSafeExternalUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 async function waitForBackendReady(): Promise<void> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < BACKEND_READY_TIMEOUT_MS) {
@@ -261,7 +269,9 @@ async function createWindow(): Promise<void> {
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    if (isSafeExternalUrl(url)) {
+      void shell.openExternal(url).catch((error) => console.error("[desktop] failed to open external URL", error));
+    }
     return { action: "deny" };
   });
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
@@ -9,6 +10,7 @@ from openai import AsyncOpenAI
 
 from ..schemas import BidWorkflowStatus, ChatStreamRequest, WorkbenchConversationCreate
 from .behavior_report import save_behavior_report
+from .logging_config import redact_log_text
 from .web_search import build_search_context, tavily_search
 from .workbench_store import workbench_store
 
@@ -19,6 +21,7 @@ CONTEXT_CHARACTER_BUDGET = 24_000
 RECENT_CONTEXT_MESSAGES = 12
 
 _cancel_events: dict[str, tuple[str, asyncio.Event]] = {}
+logger = logging.getLogger("bid_design_writer.chat")
 
 
 def sse_event(event: str, payload: dict[str, Any]) -> str:
@@ -128,8 +131,8 @@ async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator
     if active_workflow_ids:
         try:
             save_behavior_report(user_id, active_workflow_ids[0])
-        except Exception as report_exc:
-            print(f"[behavior-report] failed to save on chat for {active_workflow_ids[0]}: {report_exc}")
+        except Exception:
+            logger.warning("failed to save behavior report", extra={"workflow_id": active_workflow_ids[0], "user_id": user_id}, exc_info=True)
 
     assistant_message = workbench_store.add_message(user_id, conversation.id, "assistant", "", status="streaming", model=model, usage=context_usage)
 
@@ -242,7 +245,7 @@ async def stream_chat(user_id: str, request: ChatStreamRequest) -> AsyncIterator
         )
     except Exception as exc:
         final_content = "".join(content_parts)
-        message = str(exc)
+        message = redact_log_text(str(exc))
         workbench_store.update_message(user_id, assistant_message.id, final_content, "error", usage=context_usage, error=message)
         yield sse_event(
             "error",

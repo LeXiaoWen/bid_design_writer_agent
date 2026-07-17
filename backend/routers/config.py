@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from ..schemas import ProviderModelsResponse, ProviderProfileCreate, ProviderProfileUpdate, WebSearchConfig, WebSearchConfigUpdate
 from ..services.provider_models import list_provider_models as fetch_provider_models
+from ..services.logging_config import redact_log_text
 from ..services.workbench_store import workbench_store
 from .dependencies import current_user
 
@@ -27,7 +28,7 @@ async def list_provider_models(profile_id: str, request: Request):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"模型列表拉取失败：{exc}") from exc
+        raise HTTPException(status_code=502, detail=f"模型列表拉取失败：{redact_log_text(str(exc))}") from exc
     return ProviderModelsResponse(models=models)
 
 

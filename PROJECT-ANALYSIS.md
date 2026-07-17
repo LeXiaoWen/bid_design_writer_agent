@@ -309,11 +309,10 @@
 
 #### 5.4.1 API Key 存储
 
-**现状**：API Key 明文存储在 SQLite 数据库。
+**现状**：API Key 使用登录密码派生密钥进行 AES-GCM 加密后存储在 SQLite；退出登录或后端重启后必须重新登录解锁。
 
 **建议**：
-- 使用操作系统密钥链（macOS Keychain / Windows Credential Manager / Linux Secret Service）存储敏感密钥
-- 或至少使用 `cryptography` 库进行对称加密，密钥派生自用户密码
+- 使用 `cryptography` 库进行对称加密，密钥派生自用户登录密码，并仅在登录会话内存中保留解锁密钥
 
 #### 5.4.2 CSRF 保护
 
@@ -353,13 +352,13 @@
 - 后端启动后通过 stdout 输出实际绑定端口，Electron 监听 stdout 解析端口
 - 或使用 Unix Domain Socket 替代 TCP 端口（仅限 macOS/Linux）
 
-#### 5.5.3 密钥链集成
+#### 5.5.3 本地加密凭据库
 
-**现状**：API Key 明文存储在 SQLite。环境变量 `AI_WORKBENCH_ALLOW_MEMORY_CREDENTIALS` 暗示曾计划集成操作系统密钥链，但当前未实现。
+**现状**：API Key 使用独立随机盐和登录密码派生密钥进行 AES-GCM 加密后保存于 SQLite，不依赖系统钥匙串。
 
 **建议**：
-- 优先实现 macOS Keychain + Windows Credential Manager 集成
-- 使用 `keytar` 或 Electron `safeStorage` API 加密敏感密钥
+- 保持密钥只在登录会话内存中解锁
+- 为密钥轮换和损坏恢复提供回归测试
 
 ### 5.6 国际化准备
 
@@ -420,7 +419,7 @@
 | 🟡 中 | 后台任务无持久化（进程退出丢失） | 数据可靠性 | 中期规划 |
 | 🟡 中 | 同步 SQLite 操作在异步上下文中 | 并发性能 | 中期改造 |
 | 🟡 中 | 前端/后端类型手动同步 | 类型安全 | 中期引入代码生成 |
-| 🟡 中 | API Key 明文存储，无操作系统密钥链集成 | 安全性 | 中期加密 |
+| ✅ 已完成 | API Key 本地密码加密存储，不依赖系统钥匙串 | 安全性 | 已实施 |
 | 🟡 中 | Electron ASAR 路径处理脆弱 | 桌面端稳定性 | 中期修复 |
 | 🟡 中 | 后端端口分配存在竞争条件 | 启动可靠性 | 中期优化 |
 | 🟡 中 | React 无 Error Boundary | 用户体验 | 近期添加 |

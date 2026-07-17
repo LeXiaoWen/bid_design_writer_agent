@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 from ..schemas import BidExecutionState
 from .workbench_store import workbench_store
+from .logging_config import redact_log_text
 
 
 logger = logging.getLogger("bid_design_writer.jobs")
@@ -68,4 +69,4 @@ class BidJobWorker:
             workbench_store.update_bid_job(job["id"], state=state, progress=100, message=message)
         except Exception as exc:
             logger.exception("bid job failed", extra={"workflow_id": job["workflow_id"], "kind": job["kind"]})
-            workbench_store.update_bid_job(job["id"], state=BidExecutionState.FAILED, progress=100, message=str(exc))
+            workbench_store.update_bid_job(job["id"], state=BidExecutionState.FAILED, progress=100, message=redact_log_text(str(exc)))

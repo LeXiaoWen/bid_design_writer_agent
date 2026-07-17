@@ -34,11 +34,14 @@ from ..schemas import (
     WorkbenchProjectCreate,
     WorkbenchProjectUpdate,
 )
-from .credentials import CredentialStoreUnavailable, credential_store
 from .artifacts import markdown_line_diff
 DEFAULT_PROJECT_TITLE = "默认项目"
 MULTI_TENANT_SCHEMA_VERSION = 3
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
+
+
+class CredentialVaultLocked(RuntimeError):
+    pass
 
 
 def utc_now() -> str:
@@ -70,6 +73,7 @@ class WorkbenchStore:
         self._lock = RLock()
         self._connection = sqlite3.connect(self.path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
+        self._vault_keys: dict[str, bytes] = {}
         self._connection.execute("PRAGMA foreign_keys = ON")
         self._connection.execute("PRAGMA journal_mode = WAL")
         self._init_schema()
@@ -176,6 +180,7 @@ class WorkbenchStore:
                     updated_at TEXT NOT NULL,
                     started_at TEXT,
                     completed_at TEXT,
+                    message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
                     UNIQUE(workflow_id, kind)
                 );
 
@@ -209,6 +214,23 @@ class WorkbenchStore:
                     value TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (user_id, key)
+                );
+
+                CREATE TABLE IF NOT EXISTS credential_vaults (
+                    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    salt BLOB NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS encrypted_credentials (
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    credential_key TEXT NOT NULL,
+                    nonce BLOB NOT NULL,
+                    ciphertext BLOB NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, credential_key)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_bid_workflows_conversation_status
@@ -248,6 +270,8 @@ class WorkbenchStore:
             3: self._migrate_to_v3,
             4: self._migrate_to_v4,
             5: self._migrate_to_v5,
+            6: self._migrate_to_v6,
+            7: self._migrate_to_v7,
         }
         while version < SCHEMA_VERSION:
             target_version = version + 1
@@ -285,6 +309,30 @@ class WorkbenchStore:
             "CREATE INDEX IF NOT EXISTS idx_bid_workflows_conversation_status ON bid_workflows(conversation_id, status, updated_at DESC)"
         )
 
+    def _migrate_to_v6(self) -> None:
+        self._ensure_column("bid_jobs", "message_id", "TEXT")
+
+    def _migrate_to_v7(self) -> None:
+        self._connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS credential_vaults (
+                user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                salt BLOB NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS encrypted_credentials (
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                credential_key TEXT NOT NULL,
+                nonce BLOB NOT NULL,
+                ciphertext BLOB NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, credential_key)
+            );
+            """
+        )
+
     def _backup_legacy_database_if_needed(self) -> None:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
         has_existing_schema = self._connection.execute(
@@ -317,10 +365,10 @@ class WorkbenchStore:
                 self.set_user_setting(user_id, key, value)
 
     def migrate_legacy_secrets_on_login(self, user_id: str, password: str) -> None:
-        """Move pre-v0.2 plaintext data to the OS vault and erase it from SQLite.
+        """Move legacy plaintext data into the password-encrypted local vault.
 
         A password-encrypted recovery blob is written before any destructive operation so
-        a user can import it later if their desktop credential service was unavailable.
+        a user can import it later if the migration is interrupted.
         """
         profiles = self._execute(
             "SELECT id, credential_key, api_key FROM provider_profiles WHERE owner_user_id = ? AND api_key IS NOT NULL AND api_key != ''",
@@ -338,10 +386,10 @@ class WorkbenchStore:
         try:
             for row in profiles:
                 key = f"provider:{user_id}:{row['id']}"
-                credential_store.set(key, row["api_key"])
+                self.set_credential(user_id, key, row["api_key"])
                 self._execute("UPDATE provider_profiles SET credential_key = ?, has_key = 1 WHERE id = ?", (key, row["id"]))
             if tavily_key:
-                credential_store.set(self._tavily_credential_key(user_id), tavily_key)
+                self.set_credential(user_id, self._tavily_credential_key(user_id), tavily_key)
         finally:
             # The runtime must never continue consuming plaintext data after v0.2.
             with self._lock, self._connection:
@@ -382,7 +430,7 @@ class WorkbenchStore:
         restored = 0
         for name, secret in values.items():
             if name == "tavily":
-                credential_store.set(self._tavily_credential_key(user_id), secret)
+                self.set_credential(user_id, self._tavily_credential_key(user_id), secret)
                 self.set_user_setting(user_id, "web_search.has_key", "1")
                 restored += 1
                 continue
@@ -393,10 +441,115 @@ class WorkbenchStore:
             if not row:
                 continue
             credential_key = f"provider:{user_id}:{profile_id}"
-            credential_store.set(credential_key, secret)
+            self.set_credential(user_id, credential_key, secret)
             self._execute("UPDATE provider_profiles SET credential_key = ?, has_key = 1, api_key = NULL WHERE id = ?", (credential_key, profile_id))
             restored += 1
         return restored
+
+    def unlock_credential_vault(self, user_id: str, password: str) -> None:
+        now = utc_now()
+        with self._lock, self._connection:
+            row = self._execute("SELECT salt FROM credential_vaults WHERE user_id = ?", (user_id,)).fetchone()
+            if row is None:
+                salt = os.urandom(16)
+                self._execute(
+                    "INSERT INTO credential_vaults (user_id, salt, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                    (user_id, salt, now, now),
+                )
+            else:
+                salt = bytes(row["salt"])
+        self._vault_keys[user_id] = self._derive_vault_key(password, salt)
+
+    def lock_credential_vault(self, user_id: str) -> None:
+        self._vault_keys.pop(user_id, None)
+
+    def credential_vault_is_unlocked(self, user_id: str) -> bool:
+        return user_id in self._vault_keys
+
+    def set_credential(self, user_id: str, credential_key: str, value: str) -> None:
+        key = self._credential_vault_key(user_id)
+        nonce = os.urandom(12)
+        ciphertext = AESGCM(key).encrypt(nonce, value.encode("utf-8"), self._credential_aad(user_id, credential_key))
+        now = utc_now()
+        with self._lock, self._connection:
+            self._execute(
+                """
+                INSERT INTO encrypted_credentials (user_id, credential_key, nonce, ciphertext, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, credential_key) DO UPDATE SET nonce = excluded.nonce, ciphertext = excluded.ciphertext, updated_at = excluded.updated_at
+                """,
+                (user_id, credential_key, nonce, ciphertext, now, now),
+            )
+
+    def get_credential(self, user_id: str, credential_key: str) -> str | None:
+        key = self._credential_vault_key(user_id)
+        row = self._execute(
+            "SELECT nonce, ciphertext FROM encrypted_credentials WHERE user_id = ? AND credential_key = ?",
+            (user_id, credential_key),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            return AESGCM(key).decrypt(bytes(row["nonce"]), bytes(row["ciphertext"]), self._credential_aad(user_id, credential_key)).decode("utf-8")
+        except Exception as exc:
+            raise CredentialVaultLocked("本地加密密钥无法解锁，请重新登录后重试。") from exc
+
+    def delete_credential(self, user_id: str, credential_key: str) -> None:
+        self._credential_vault_key(user_id)
+        with self._lock, self._connection:
+            self._execute("DELETE FROM encrypted_credentials WHERE user_id = ? AND credential_key = ?", (user_id, credential_key))
+
+    def rotate_credential_vault(self, user_id: str, current_password: str, new_password: str) -> None:
+        old_key = self._credential_vault_key(user_id)
+        row = self._execute("SELECT salt FROM credential_vaults WHERE user_id = ?", (user_id,)).fetchone()
+        if not row:
+            raise CredentialVaultLocked("本地加密凭据库不可用。")
+        expected_key = self._derive_vault_key(current_password, bytes(row["salt"]))
+        if expected_key != old_key:
+            raise CredentialVaultLocked("本地加密凭据库无法用当前密码解锁。")
+        records = self._execute(
+            "SELECT credential_key, nonce, ciphertext FROM encrypted_credentials WHERE user_id = ?",
+            (user_id,),
+        ).fetchall()
+        values = []
+        for record in records:
+            name = record["credential_key"]
+            value = AESGCM(old_key).decrypt(bytes(record["nonce"]), bytes(record["ciphertext"]), self._credential_aad(user_id, name))
+            values.append((name, value))
+        salt = os.urandom(16)
+        new_key = self._derive_vault_key(new_password, salt)
+        now = utc_now()
+        with self._lock, self._connection:
+            self._execute("UPDATE credential_vaults SET salt = ?, updated_at = ? WHERE user_id = ?", (salt, now, user_id))
+            for name, value in values:
+                nonce = os.urandom(12)
+                ciphertext = AESGCM(new_key).encrypt(nonce, value, self._credential_aad(user_id, name))
+                self._execute(
+                    "UPDATE encrypted_credentials SET nonce = ?, ciphertext = ?, updated_at = ? WHERE user_id = ? AND credential_key = ?",
+                    (nonce, ciphertext, now, user_id, name),
+                )
+        self._vault_keys[user_id] = new_key
+
+    def sync_credential_status(self, user_id: str) -> None:
+        profiles = self._execute("SELECT id, credential_key FROM provider_profiles WHERE owner_user_id = ?", (user_id,)).fetchall()
+        with self._lock, self._connection:
+            for profile in profiles:
+                has_key = 1 if self.get_credential(user_id, profile["credential_key"]) else 0
+                self._execute("UPDATE provider_profiles SET has_key = ? WHERE id = ?", (has_key, profile["id"]))
+            has_tavily_key = 1 if self.get_credential(user_id, self._tavily_credential_key(user_id)) else 0
+            self.set_user_setting(user_id, "web_search.has_key", str(has_tavily_key))
+
+    def _credential_vault_key(self, user_id: str) -> bytes:
+        key = self._vault_keys.get(user_id)
+        if key is None:
+            raise CredentialVaultLocked("请重新登录以解锁本地加密凭据库。")
+        return key
+
+    def _derive_vault_key(self, password: str, salt: bytes) -> bytes:
+        return Scrypt(salt=salt, length=32, n=2**14, r=8, p=1).derive(password.encode("utf-8"))
+
+    def _credential_aad(self, user_id: str, credential_key: str) -> bytes:
+        return f"{user_id}:{credential_key}".encode("utf-8")
 
     def _rebuild_search_index(self) -> None:
         self._connection.execute("DROP TABLE IF EXISTS search_index")
@@ -545,6 +698,13 @@ class WorkbenchStore:
         now = utc_now()
         with self._lock, self._connection:
             self._execute("UPDATE auth_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL", (now, token_hash))
+
+    def has_active_auth_sessions(self, user_id: str, now: str) -> bool:
+        row = self._execute(
+            "SELECT 1 FROM auth_sessions WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ? LIMIT 1",
+            (user_id, now),
+        ).fetchone()
+        return row is not None
 
     def get_project(self, user_id: str, project_id: str) -> WorkbenchProject:
         row = self._execute("SELECT * FROM projects WHERE id = ? AND owner_user_id = ?", (project_id, user_id)).fetchone()
@@ -785,17 +945,22 @@ class WorkbenchStore:
         """Restart work interrupted by an application exit once; otherwise leave it failed."""
         now = utc_now()
         with self._lock, self._connection:
-            rows = self._execute("SELECT workflow_id, owner_user_id, attempts FROM bid_jobs WHERE state = ?", (BidExecutionState.RUNNING.value,)).fetchall()
+            rows = self._execute("SELECT id, workflow_id, owner_user_id, attempts, message_id FROM bid_jobs WHERE state = ?", (BidExecutionState.RUNNING.value,)).fetchall()
             for row in rows:
+                if row["message_id"]:
+                    self._execute(
+                        "UPDATE messages SET status = ?, finish_reason = ?, updated_at = ? WHERE id = ? AND status = 'streaming'",
+                        ("interrupted", "restarted", now, row["message_id"]),
+                    )
                 if row["attempts"] < 1:
                     self._execute(
-                        "UPDATE bid_jobs SET state = ?, attempts = attempts + 1, message = ?, updated_at = ? WHERE workflow_id = ?",
-                        (BidExecutionState.QUEUED.value, "应用重启后正在恢复。", now, row["workflow_id"]),
+                        "UPDATE bid_jobs SET state = ?, attempts = attempts + 1, message = ?, message_id = NULL, updated_at = ? WHERE id = ?",
+                        (BidExecutionState.QUEUED.value, "应用重启后正在恢复。", now, row["id"]),
                     )
                 else:
                     self._execute(
-                        "UPDATE bid_jobs SET state = ?, message = ?, updated_at = ?, completed_at = ? WHERE workflow_id = ?",
-                        (BidExecutionState.FAILED.value, "应用中断后恢复失败，请手动重试。", now, now, row["workflow_id"]),
+                        "UPDATE bid_jobs SET state = ?, message = ?, message_id = NULL, updated_at = ?, completed_at = ? WHERE id = ?",
+                        (BidExecutionState.FAILED.value, "应用中断后恢复失败，请手动重试。", now, now, row["id"]),
                     )
                     self._execute(
                         "UPDATE bid_workflows SET status = ?, error = ?, updated_at = ? WHERE id = ?",
@@ -844,6 +1009,29 @@ class WorkbenchStore:
             values.append(job_id)
         with self._lock, self._connection:
             self._execute(f"UPDATE bid_jobs SET {', '.join(assignments)} WHERE {where}", values)
+
+    def attach_bid_job_message(self, job_id: str, user_id: str, workflow_id: str, message_id: str) -> None:
+        self.get_message(user_id, message_id)
+        with self._lock, self._connection:
+            self._execute(
+                "UPDATE bid_jobs SET message_id = ?, updated_at = ? WHERE id = ? AND owner_user_id = ? AND workflow_id = ? AND state = ?",
+                (message_id, utc_now(), job_id, user_id, workflow_id, BidExecutionState.RUNNING.value),
+            )
+
+    def get_bid_streaming_message(self, user_id: str, workflow_id: str) -> WorkbenchMessage | None:
+        self.get_bid_workflow(user_id, workflow_id)
+        row = self._execute(
+            """
+            SELECT messages.* FROM bid_jobs
+            JOIN messages ON messages.id = bid_jobs.message_id
+            WHERE bid_jobs.workflow_id = ? AND bid_jobs.owner_user_id = ?
+              AND bid_jobs.state = ? AND messages.status = 'streaming'
+            ORDER BY bid_jobs.updated_at DESC
+            LIMIT 1
+            """,
+            (workflow_id, user_id, BidExecutionState.RUNNING.value),
+        ).fetchone()
+        return self._message_from_row(row) if row else None
 
     def cancel_bid_jobs(self, workflow_id: str) -> None:
         self._execute(
@@ -1153,7 +1341,7 @@ class WorkbenchStore:
         credential_key = f"provider:{user_id}:{profile_id}"
         api_key = request.api_key.strip() if request.api_key else None
         if api_key:
-            credential_store.set(credential_key, api_key)
+            self.set_credential(user_id, credential_key, api_key)
         with self._lock, self._connection:
             self._execute(
                 """
@@ -1191,9 +1379,9 @@ class WorkbenchStore:
             has_key = 1 if api_key else 0
             credential_key = row["credential_key"] if row else f"provider:{user_id}:{profile_id}"
             if api_key:
-                credential_store.set(credential_key, api_key)
+                self.set_credential(user_id, credential_key, api_key)
             else:
-                credential_store.delete(credential_key)
+                self.delete_credential(user_id, credential_key)
         else:
             has_key = int(profile.has_key)
         with self._lock, self._connection:
@@ -1271,9 +1459,9 @@ class WorkbenchStore:
             key = request.api_key.strip() or None
             credential_key = self._tavily_credential_key(user_id)
             if key:
-                credential_store.set(credential_key, key)
+                self.set_credential(user_id, credential_key, key)
             else:
-                credential_store.delete(credential_key)
+                self.delete_credential(user_id, credential_key)
             self.set_user_setting(user_id, "web_search.api_key", "")
             self.set_user_setting(user_id, "web_search.has_key", "1" if key else "0")
         if request.max_results is not None:
@@ -1286,7 +1474,7 @@ class WorkbenchStore:
         row = self._execute("SELECT credential_key FROM provider_profiles WHERE id = ? AND owner_user_id = ?", (profile_id, user_id)).fetchone()
         self.get_provider_profile(user_id, profile_id)
         if row:
-            credential_store.delete(row["credential_key"])
+            self.delete_credential(user_id, row["credential_key"])
         with self._lock, self._connection:
             self._execute("DELETE FROM provider_profiles WHERE id = ? AND owner_user_id = ?", (profile_id, user_id))
 
@@ -1300,7 +1488,7 @@ class WorkbenchStore:
             raise KeyError(profile_id)
         if not row["has_key"]:
             return None
-        return credential_store.get(row["credential_key"])
+        return self.get_credential(user_id, row["credential_key"])
 
     def resolve_tavily_api_key(self, user_id: str) -> str | None:
         """返回 Tavily API key。
@@ -1311,10 +1499,10 @@ class WorkbenchStore:
         return key
 
     def _resolve_tavily_api_key_with_source(self, user_id: str) -> tuple[str | None, str]:
-        """返回 (api_key, source)，source 为 'system' / 'env' / 'none'。"""
-        user_key = credential_store.get(self._tavily_credential_key(user_id))
+        """返回 (api_key, source)，source 为 'vault' / 'env' / 'none'。"""
+        user_key = self.get_credential(user_id, self._tavily_credential_key(user_id))
         if user_key:
-            return user_key, "system"
+            return user_key, "vault"
         env_key = os.getenv("TAVILY_API_KEY", "").strip()
         if env_key:
             return env_key, "env"

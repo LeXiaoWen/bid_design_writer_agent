@@ -115,6 +115,17 @@ def test_xlsx_signature_error():
         parse_document("招标.xlsx", b"not-a-zip")
 
 
+def test_office_document_rejects_excessive_uncompressed_content(monkeypatch):
+    monkeypatch.setattr(document_parser, "MAX_ARCHIVE_UNCOMPRESSED_BYTES", 16)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", "x" * 20)
+        archive.writestr("word/document.xml", "<document />")
+
+    with pytest.raises(ValueError, match="解压后过大"):
+        parse_document("招标.docx", buffer.getvalue())
+
+
 def test_parse_scanned_pdf_uses_ocr(monkeypatch):
     class FakePage:
         def extract_text(self):
