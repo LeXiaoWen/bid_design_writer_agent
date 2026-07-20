@@ -157,6 +157,25 @@ export type AuthUser = {
   last_login_at?: string | null;
 };
 
+export type ThemeAppearance = "auto" | "light" | "dark";
+
+export type UserTheme = {
+  id: string;
+  name: string;
+  source: "system" | "custom";
+  appearance: ThemeAppearance;
+  image_url?: string | null;
+  width?: number | null;
+  height?: number | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type ThemeListResponse = {
+  active_theme_id: string;
+  themes: UserTheme[];
+};
+
 export type ChatStreamEvent =
   | {
       event: "message_start";

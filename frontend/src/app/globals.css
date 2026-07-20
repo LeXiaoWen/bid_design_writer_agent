@@ -62,6 +62,348 @@ textarea:focus {
   background: var(--app-bg);
 }
 
+.workbench-shell[data-theme="custom"] {
+  --app-bg: var(--theme-bg);
+  --text: var(--theme-text);
+  --soft-text: var(--theme-muted);
+  --faint-text: color-mix(in srgb, var(--theme-muted) 62%, transparent);
+  --border: color-mix(in srgb, var(--theme-accent) 18%, var(--theme-panel));
+  --border-strong: color-mix(in srgb, var(--theme-accent) 30%, var(--theme-panel));
+  --card: color-mix(in srgb, var(--theme-panel) 90%, transparent);
+  --card-soft: color-mix(in srgb, var(--theme-panel-soft) 86%, transparent);
+  --accent: var(--theme-accent);
+  --sidebar-top: color-mix(in srgb, var(--theme-panel) 68%, transparent);
+  --sidebar-bottom: color-mix(in srgb, var(--theme-panel-soft) 72%, transparent);
+  position: relative;
+  isolation: isolate;
+  /* 背景图直接渲染在元素上 */
+  background-image: var(--theme-art);
+  background-position: var(--theme-focus-x) 50%;
+  background-repeat: no-repeat;
+  background-size: cover;
+}
+
+/* 用 ::after 加一层极轻的可读性遮罩 */
+.workbench-shell[data-theme="custom"]::after {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--theme-bg) 45%, transparent) 0%,
+    color-mix(in srgb, var(--theme-bg) 22%, transparent) 40%,
+    color-mix(in srgb, var(--theme-bg) 8%, transparent) 72%,
+    transparent 100%
+  );
+}
+
+/* safeArea=right: 遮罩从右向左 */
+.workbench-shell[data-theme="custom"][data-theme-safe="right"]::after {
+  background: linear-gradient(
+    270deg,
+    color-mix(in srgb, var(--theme-bg) 45%, transparent) 0%,
+    color-mix(in srgb, var(--theme-bg) 22%, transparent) 40%,
+    color-mix(in srgb, var(--theme-bg) 8%, transparent) 72%,
+    transparent 100%
+  );
+}
+
+/* safeArea=center: 两侧极轻遮罩 */
+.workbench-shell[data-theme="custom"][data-theme-safe="center"]::after {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--theme-bg) 30%, transparent) 30%,
+    color-mix(in srgb, var(--theme-bg) 30%, transparent) 70%,
+    transparent 100%
+  );
+}
+
+/* safeArea=none: 几乎不遮 */
+.workbench-shell[data-theme="custom"][data-theme-safe="none"]::after {
+  background: color-mix(in srgb, var(--theme-bg) 12%, transparent);
+}
+
+/* banner: 顶部横幅展示（针对 ultrawide 图片） */
+.workbench-shell[data-theme="custom"][data-theme-task="banner"] {
+  background-position: center top, var(--theme-focus-x) top;
+  background-size: cover, cover;
+}
+
+.workbench-shell[data-theme="custom"] > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* 工作区模式：用 ::after 叠加半透明层降低背景视觉强度 */
+/* 工作模式：::after 加重遮罩保证内容可读 */
+.workbench-shell[data-theme="custom"][data-theme-mode="work"]::after,
+.workbench-shell[data-theme="custom"][data-theme-mode="workflow"]::after {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--theme-bg) 72%, transparent);
+}
+
+/* 侧栏和聊天区：半透明面板，背景图清晰透出 */
+.workbench-shell[data-theme="custom"] .sidebar {
+  background: color-mix(in srgb, var(--theme-panel) 58%, transparent);
+}
+
+.workbench-shell[data-theme="custom"] .chat-workspace {
+  background: color-mix(in srgb, var(--theme-panel) 38%, transparent);
+}
+
+/* 工作模式下面板更不透明，保护阅读体验 */
+.workbench-shell[data-theme="custom"][data-theme-mode="work"] .chat-workspace,
+.workbench-shell[data-theme="custom"][data-theme-mode="workflow"] .chat-workspace {
+  background: color-mix(in srgb, var(--theme-panel) 82%, transparent);
+  backdrop-filter: blur(8px) saturate(105%);
+}
+
+.workbench-shell[data-theme="custom"] .composer,
+.workbench-shell[data-theme="custom"] .message-bubble,
+.workbench-shell[data-theme="custom"] .workflow-panel,
+.workbench-shell[data-theme="custom"] .artifact-panel {
+  background: color-mix(in srgb, var(--theme-panel) 70%, transparent);
+  border-color: color-mix(in srgb, var(--theme-accent) 18%, var(--theme-panel));
+}
+
+.workbench-shell[data-theme="custom"] .message-row.user .message-bubble {
+  background: color-mix(in srgb, var(--theme-panel-soft) 70%, transparent);
+}
+
+.workbench-shell[data-theme="custom"] .landing-stage h1,
+.workbench-shell[data-theme="custom"] .conversation-title h1,
+.workbench-shell[data-theme="custom"] .workflow-header strong {
+  color: var(--theme-text);
+}
+
+/* 侧栏文字阴影 — 在背景图上保持可读 */
+.workbench-shell[data-theme="custom"] .sidebar .app-mark,
+.workbench-shell[data-theme="custom"] .sidebar .menu-command span,
+.workbench-shell[data-theme="custom"] .sidebar .section-label,
+.workbench-shell[data-theme="custom"] .sidebar .nav-list button,
+.workbench-shell[data-theme="custom"] .sidebar .project-row span,
+.workbench-shell[data-theme="custom"] .sidebar .conversation-row span,
+.workbench-shell[data-theme="custom"] .sidebar .account-copy strong,
+.workbench-shell[data-theme="custom"] .sidebar .account-copy span {
+  text-shadow: 0 1px 3px color-mix(in srgb, var(--theme-panel) 60%, transparent);
+}
+
+/* 侧栏文字颜色跟随主题 — 解决背景图上看不清的问题 */
+.workbench-shell[data-theme="custom"] .sidebar {
+  color: var(--theme-text);
+}
+
+.workbench-shell[data-theme="custom"] .sidebar .app-mark {
+  color: var(--theme-text);
+}
+
+.workbench-shell[data-theme="custom"] .sidebar .menu-command span {
+  color: var(--theme-text);
+}
+
+.workbench-shell[data-theme="custom"] .sidebar .section-label {
+  color: var(--theme-muted);
+}
+
+.workbench-shell[data-theme="custom"] .sidebar .nav-list button,
+.workbench-shell[data-theme="custom"] .sidebar .project-row span,
+.workbench-shell[data-theme="custom"] .sidebar .conversation-row span,
+.workbench-shell[data-theme="custom"] .sidebar .project-chat-row,
+.workbench-shell[data-theme="custom"] .sidebar .search-results button,
+.workbench-shell[data-theme="custom"] .sidebar .search-results strong {
+  color: var(--theme-text);
+}
+
+.workbench-shell[data-theme="custom"] .sidebar .search-results span,
+.workbench-shell[data-theme="custom"] .sidebar .conversation-row time,
+.workbench-shell[data-theme="custom"] .sidebar .project-chat-row time,
+.workbench-shell[data-theme="custom"] .sidebar .empty-sidebar {
+  color: var(--theme-muted);
+}
+
+.workbench-shell[data-theme="custom"] .sidebar .account-copy strong {
+  color: var(--theme-text);
+}
+
+.workbench-shell[data-theme="custom"] .sidebar .account-copy span {
+  color: var(--theme-muted);
+}
+
+.workbench-shell[data-theme="custom"] .sidebar .search-box input {
+  color: var(--theme-text);
+}
+
+.workbench-shell[data-theme="custom"] .sidebar .search-box input::placeholder {
+  color: var(--theme-muted);
+}
+
+.workbench-shell[data-theme="custom"] .sidebar .row-delete {
+  color: var(--theme-muted);
+}
+
+.workbench-shell[data-theme="custom"] .sidebar .project-expand-toggle {
+  color: var(--theme-muted);
+}
+
+.workbench-shell[data-theme="custom"] .sidebar .workspace-picker-row {
+  color: var(--theme-text);
+}
+
+/* 侧栏 hover/active 状态 */
+.workbench-shell[data-theme="custom"] .sidebar .sidebar-item-shell:hover,
+.workbench-shell[data-theme="custom"] .sidebar .search-results button:hover {
+  background: color-mix(in srgb, var(--theme-accent) 12%, transparent);
+}
+
+.workbench-shell[data-theme="custom"] .sidebar .sidebar-item-shell.active {
+  background: color-mix(in srgb, var(--theme-accent) 18%, transparent);
+}
+
+.workbench-shell[data-theme="custom"] .sidebar .ghost-icon,
+.workbench-shell[data-theme="custom"] .sidebar .menu-command svg,
+.workbench-shell[data-theme="custom"] .sidebar .nav-list button svg,
+.workbench-shell[data-theme="custom"] .sidebar .project-row svg,
+.workbench-shell[data-theme="custom"] .sidebar .conversation-row svg {
+  color: var(--theme-muted);
+}
+
+.workbench-shell[data-theme="custom"] .sidebar .ghost-icon:hover,
+.workbench-shell[data-theme="custom"] .sidebar .menu-command:hover span,
+.workbench-shell[data-theme="custom"] .sidebar .menu-command:hover svg {
+  color: var(--theme-text);
+}
+
+.workbench-shell[data-theme="custom"] .sidebar .search-box {
+  border-color: color-mix(in srgb, var(--theme-muted) 20%, transparent);
+  background: color-mix(in srgb, var(--theme-panel) 40%, transparent);
+}
+
+/* ====== 右侧聊天区主题色适配 ====== */
+
+.workbench-shell[data-theme="custom"] .chat-workspace {
+  color: var(--theme-text);
+}
+
+/* Landing 首页 */
+.workbench-shell[data-theme="custom"] .landing-stage {
+  color: var(--theme-text);
+}
+
+/* 对话标题 */
+.workbench-shell[data-theme="custom"] .conversation-title span {
+  color: var(--theme-muted);
+}
+
+/* 消息元信息 */
+.workbench-shell[data-theme="custom"] .message-meta {
+  color: var(--theme-muted);
+}
+
+/* 消息状态 */
+.workbench-shell[data-theme="custom"] .message-status {
+  color: var(--theme-muted);
+}
+
+/* 空状态 */
+.workbench-shell[data-theme="custom"] .empty-state {
+  color: var(--theme-muted);
+}
+
+/* 输入框 */
+.workbench-shell[data-theme="custom"] .composer textarea {
+  color: var(--theme-text);
+}
+.workbench-shell[data-theme="custom"] .composer textarea::placeholder {
+  color: var(--theme-muted);
+}
+
+/* 工具栏按钮 */
+.workbench-shell[data-theme="custom"] .composer-toolbar button {
+  color: var(--theme-text);
+}
+.workbench-shell[data-theme="custom"] .access-button {
+  color: var(--theme-text);
+}
+.workbench-shell[data-theme="custom"] .web-search-toggle {
+  color: var(--theme-text);
+}
+.workbench-shell[data-theme="custom"] .model-select {
+  color: var(--theme-text);
+}
+
+/* 项目选择器 */
+.workbench-shell[data-theme="custom"] .choose-project {
+  color: var(--theme-text);
+}
+
+/* 附件按钮 */
+.workbench-shell[data-theme="custom"] .attachment-add-button {
+  color: var(--theme-muted);
+}
+
+/* 附件菜单 */
+.workbench-shell[data-theme="custom"] .attachment-menu-item {
+  color: var(--theme-text);
+}
+
+/* 模型菜单 */
+.workbench-shell[data-theme="custom"] .model-option {
+  color: var(--theme-text);
+}
+.workbench-shell[data-theme="custom"] .model-menu-status {
+  color: var(--theme-muted);
+}
+
+/* 工作流面板 */
+.workbench-shell[data-theme="custom"] .workflow-header span {
+  color: var(--theme-muted);
+}
+.workbench-shell[data-theme="custom"] .workflow-actions label {
+  color: var(--theme-muted);
+}
+.workbench-shell[data-theme="custom"] .workflow-actions textarea,
+.workbench-shell[data-theme="custom"] .workflow-actions select {
+  color: var(--theme-text);
+}
+.workbench-shell[data-theme="custom"] .workflow-note {
+  color: var(--theme-muted);
+  border-color: color-mix(in srgb, var(--theme-muted) 20%, transparent);
+  background: color-mix(in srgb, var(--theme-panel) 60%, transparent);
+}
+.workbench-shell[data-theme="custom"] .workflow-header-tools button {
+  color: var(--theme-text);
+  border-color: color-mix(in srgb, var(--theme-muted) 30%, transparent);
+  background: color-mix(in srgb, var(--theme-panel) 60%, transparent);
+}
+
+/* 附件列表 */
+.workbench-shell[data-theme="custom"] .artifact-list a,
+.workbench-shell[data-theme="custom"] .artifact-list button {
+  color: var(--theme-text);
+}
+
+/* Markdown 内容区 */
+.workbench-shell[data-theme="custom"] .markdown-pane {
+  color: var(--theme-text);
+}
+
+/* 文件上传进度 */
+.workbench-shell[data-theme="custom"] .upload-progress {
+  color: var(--theme-muted);
+}
+
+/* spin 图标 */
+.workbench-shell[data-theme="custom"] .spin-icon {
+  color: var(--theme-muted);
+}
+
 .workbench-shell[data-sidebar="collapsed"] {
   grid-template-columns: 74px minmax(0, 1fr);
 }

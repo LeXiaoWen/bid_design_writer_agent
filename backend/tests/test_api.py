@@ -3,6 +3,7 @@ import os
 import sqlite3
 import tempfile
 import zipfile
+from PIL import Image
 from pathlib import Path
 from urllib.parse import quote
 from uuid import uuid4
@@ -33,6 +34,13 @@ client.headers.update(
         "X-App-Auth-Secret": "test-app-secret",
     }
 )
+
+
+def theme_png_bytes(size: tuple[int, int] = (8, 8)) -> bytes:
+    image = Image.new("RGB", size, "#4b7185")
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
 
 
 def register_tenant_client(username: str) -> tuple[TestClient, str]:
@@ -107,6 +115,56 @@ def test_auth_error_keeps_cors_headers_for_app_frontend():
     assert response.status_code == 403
     assert response.headers["access-control-allow-origin"] == "app://frontend"
     assert response.json()["detail"] == "本机访问密钥无效。"
+
+
+def test_themes_are_private_and_custom_images_are_not_exposed_by_path(tmp_path, monkeypatch):
+    monkeypatch.setattr("backend.routers.themes.data_dir", lambda: tmp_path)
+    initial = client.get("/api/v1/themes")
+    assert initial.status_code == 200
+    assert initial.json()["active_theme_id"] == "system"
+    assert initial.json()["themes"] == [{"id": "system", "name": "系统工作台", "source": "system", "appearance": "auto", "image_url": None, "width": None, "height": None, "created_at": None, "updated_at": None}]
+
+    created = client.post(
+        "/api/v1/themes",
+        data={"name": "蓝图", "appearance": "dark"},
+        files={"file": ("blueprint.png", theme_png_bytes(), "image/png")},
+    )
+    assert created.status_code == 200
+    theme = created.json()
+    assert theme["image_url"] == f"/api/v1/themes/{theme['id']}/image"
+    assert "image_path" not in theme
+    assert theme["appearance"] == "dark"
+
+    image = client.get(theme["image_url"])
+    assert image.status_code == 200
+    assert image.headers["content-type"] == "image/png"
+    assert image.content == theme_png_bytes()
+
+    other_client, _ = register_tenant_client("theme-other-user")
+    assert other_client.get(theme["image_url"]).status_code == 404
+
+    deleted = client.delete(f"/api/v1/themes/{theme['id']}")
+    assert deleted.status_code == 200
+    assert client.get("/api/v1/themes").json()["active_theme_id"] == "system"
+    assert not list((tmp_path / "themes" / TEST_USER_ID).glob("*"))
+
+
+def test_theme_upload_rejects_mismatched_mime_and_oversized_pixels_without_writing(tmp_path, monkeypatch):
+    monkeypatch.setattr("backend.routers.themes.data_dir", lambda: tmp_path)
+    invalid = client.post(
+        "/api/v1/themes",
+        files={"file": ("blueprint.png", theme_png_bytes(), "image/jpeg")},
+    )
+    assert invalid.status_code == 400
+    assert not (tmp_path / "themes").exists()
+
+    monkeypatch.setattr("backend.services.theme_assets.MAX_THEME_IMAGE_PIXELS", 1)
+    too_large = client.post(
+        "/api/v1/themes",
+        files={"file": ("blueprint.png", theme_png_bytes(), "image/png")},
+    )
+    assert too_large.status_code == 400
+    assert not (tmp_path / "themes").exists()
 
 
 def test_legacy_project_routes_are_removed():

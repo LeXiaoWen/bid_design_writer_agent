@@ -200,6 +200,35 @@ class RestoreCredentialsRequest(BaseModel):
     password: str = Field(min_length=1)
 
 
+class ThemeAppearance(str, Enum):
+    AUTO = "auto"
+    LIGHT = "light"
+    DARK = "dark"
+
+
+class UserTheme(BaseModel):
+    id: str
+    name: str
+    source: Literal["system", "custom"]
+    appearance: ThemeAppearance = ThemeAppearance.AUTO
+    image_url: Optional[str] = None
+    image_path: Optional[str] = Field(default=None, exclude=True)
+    media_type: Optional[str] = Field(default=None, exclude=True)
+    width: Optional[int] = None
+    height: Optional[int] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class ThemeListResponse(BaseModel):
+    active_theme_id: str
+    themes: List[UserTheme]
+
+
+class ThemeActivateRequest(BaseModel):
+    theme_id: str = Field(min_length=1)
+
+
 class WorkbenchProject(BaseModel):
     id: str
     title: str
