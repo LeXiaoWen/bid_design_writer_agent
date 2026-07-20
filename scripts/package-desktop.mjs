@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -14,6 +14,18 @@ const defaultTargets = {
 
 function command(name) {
   return process.platform === "win32" ? `${name}.cmd` : name;
+}
+
+function localDocConverterEnv() {
+  const envPath = join(projectRoot, ".env");
+  if (!existsSync(envPath)) return {};
+  const values = {};
+  for (const line of readFileSync(envPath, "utf8").split(/\r?\n/)) {
+    const match = line.match(/^\s*(DOC_CONVERTER_(?:DIR|EXECUTABLE))\s*=\s*(.*?)\s*$/);
+    if (!match) continue;
+    values[match[1]] = match[2].replace(/^(?:"|')|(?:"|')$/g, "");
+  }
+  return values;
 }
 
 function run(cmd, args, env = process.env) {
@@ -74,6 +86,7 @@ function assertHostPlatform(target) {
 
 try {
   const options = readOptions(process.argv.slice(2));
+  const packagingEnv = { ...localDocConverterEnv(), ...process.env };
   assertHostPlatform(options.target);
 
   const targets = options.dir ? [] : options.targets.length > 0 ? options.targets : defaultTargets[options.target];
@@ -88,7 +101,7 @@ try {
 
   run(process.execPath, ["scripts/sync-version.mjs"]);
   run(command("npm"), ["run", "build"]);
-  run(command("npm"), ["run", "build:agent"], { ...process.env, REQUIRE_DOC_CONVERTER: "true" });
+  run(command("npm"), ["run", "build:agent"], { ...packagingEnv, REQUIRE_DOC_CONVERTER: "true" });
   run(process.execPath, ["scripts/run-electron-builder.mjs", ...builderArgs]);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));

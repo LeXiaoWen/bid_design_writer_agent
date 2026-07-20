@@ -506,6 +506,10 @@ textarea:focus {
   grid-template-columns: minmax(0, 1fr) 26px 30px;
 }
 
+.sidebar-item-shell.project-shell > .row-delete {
+  grid-column: -2 / -1;
+}
+
 .sidebar-item-shell.active {
   background: rgba(207, 223, 233, 0.76);
 }

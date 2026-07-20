@@ -154,7 +154,7 @@ packaging/icons/icon.ico   # Windows
 
 ### 旧版 DOC 打包转换器
 
-正式安装包会把 LibreOffice headless 一并放入后端 agent，避免依赖终端用户安装系统转换器。打包机器需提供目标系统的 LibreOffice 目录，并在执行 `npm run pack` 或 `npm run dist:*` 前设置：
+正式安装包会把 LibreOffice headless 一并放入后端 agent，避免依赖终端用户安装系统转换器。打包机器需提供目标系统的 LibreOffice 目录；可写入本地 `.env`（`npm run pack` 或 `npm run dist:*` 会自动读取），或在执行前导出：
 
 ```bash
 export DOC_CONVERTER_DIR="/path/to/LibreOffice"
