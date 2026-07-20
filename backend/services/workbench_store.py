@@ -39,6 +39,201 @@ from ..schemas import (
 from .artifacts import markdown_line_diff
 DEFAULT_PROJECT_TITLE = "默认项目"
 MULTI_TENANT_SCHEMA_VERSION = 3
+SCHEMA_VERSION = 9
+
+
+class CredentialVaultLocked(RuntimeError):
+    pass
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def ensure_private_directory(path: Path) -> Path:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+    return path
+
+
+def restrict_file_permissions(path: Path) -> None:
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def data_dir() -> Path:
+    raw = os.getenv("AI_WORKBENCH_DATA_DIR")
+    if raw:
+        path = Path(raw).expanduser()
+    else:
+        path = Path.cwd() / ".data"
+    return ensure_private_directory(path)
+
+
+def db_path() -> Path:
+    raw = os.getenv("AI_WORKBENCH_DB_PATH")
+    if raw:
+        path = Path(raw).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+    return data_dir() / "app.db"
+
+
+class WorkbenchStore:
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path or db_path()
+        self._lock = RLock()
+        self._connection = sqlite3.connect(self.path, check_same_thread=False)
+        restrict_file_permissions(self.path)
+        self._connection.row_factory = sqlite3.Row
+        self._vault_keys: dict[str, bytes] = {}
+        self._connection.execute("PRAGMA foreign_keys = ON")
+        self._connection.execute("PRAGMA journal_mode = WAL")
+        self._init_schema()
+
+    def _init_schema(self) -> None:
+        self._backup_legacy_database_if_needed()
+        with self._lock, self._connection:
+            self._connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS projects (
+                    id TEXT PRIMARY KEY,
+                    owner_user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    workspace_path TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    provider_profile_id TEXT,
+                    model TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS messages (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    model TEXT,
+                    finish_reason TEXT,
+                    usage_json TEXT,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS provider_profiles (
+                    id TEXT PRIMARY KEY,
+                    owner_user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+                    provider TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    base_url TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    credential_key TEXT NOT NULL UNIQUE,
+                    has_key INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS bid_workflows (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                    provider_profile_id TEXT REFERENCES provider_profiles(id) ON DELETE SET NULL,
+                    file_name TEXT NOT NULL,
+                    file_text TEXT NOT NULL,
+                    extracted_markdown TEXT NOT NULL DEFAULT '',
+                    confirmation_text TEXT NOT NULL DEFAULT '',
+                    template_choice TEXT,
+                    status TEXT NOT NULL,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS bid_artifacts (
+                    id TEXT PRIMARY KEY,
+                    workflow_id TEXT NOT NULL REFERENCES bid_workflows(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    path TEXT,
+                    content TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS bid_artifact_versions (
+                    id TEXT PRIMARY KEY,
+                    workflow_id TEXT NOT NULL REFERENCES bid_workflows(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(workflow_id, name, version)
+                );
+
+                CREATE TABLE IF NOT EXISTS bid_jobs (
+                    id TEXT PRIMARY KEY,
+                    workflow_id TEXT NOT NULL REFERENCES bid_workflows(id) ON DELETE CASCADE,
+                    owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    progress INTEGER NOT NULL DEFAULT 0,
+                    message TEXT NOT NULL DEFAULT '',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+                    UNIQUE(workflow_id, kind)
+                );
+
+                CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_login_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS auth_sessions (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    revoked_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, key)
+                );
+
                 CREATE TABLE IF NOT EXISTS credential_vaults (
                     user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
                     salt BLOB NOT NULL,
@@ -56,27 +251,12 @@ MULTI_TENANT_SCHEMA_VERSION = 3
                     PRIMARY KEY (user_id, credential_key)
                 );
 
-                CREATE TABLE IF NOT EXISTS user_themes (
-                    id TEXT PRIMARY KEY,
-                    owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                    name TEXT NOT NULL,
-                    image_path TEXT NOT NULL,
-                    media_type TEXT NOT NULL,
-                    width INTEGER NOT NULL,
-                    height INTEGER NOT NULL,
-                    appearance TEXT NOT NULL DEFAULT 'auto',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
                 CREATE INDEX IF NOT EXISTS idx_bid_workflows_conversation_status
                 ON bid_workflows(conversation_id, status, updated_at DESC);
 
                 CREATE INDEX IF NOT EXISTS idx_bid_jobs_next ON bid_jobs(state, created_at);
 
                 CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at);
-
-                CREATE INDEX IF NOT EXISTS idx_user_themes_owner_updated ON user_themes(owner_user_id, updated_at DESC);
 
                 CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
                     owner_user_id UNINDEXED,
@@ -1361,14 +1541,10 @@ MULTI_TENANT_SCHEMA_VERSION = 3
 
     def _theme_from_row(self, row: sqlite3.Row) -> UserTheme:
         return UserTheme(
-            id=row["id"],
-            name=row["name"],
-            source="custom",
+            id=row["id"], name=row["name"], source="custom",
             appearance=ThemeAppearance(row["appearance"]),
-            width=row["width"],
-            height=row["height"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
+            width=row["width"], height=row["height"],
+            created_at=row["created_at"], updated_at=row["updated_at"],
         )
 
     def list_user_themes(self, user_id: str) -> list[UserTheme]:
@@ -1389,24 +1565,13 @@ MULTI_TENANT_SCHEMA_VERSION = 3
         return theme.model_copy(update={"image_path": row["image_path"], "media_type": row["media_type"]})
 
     def create_user_theme(
-        self,
-        user_id: str,
-        *,
-        theme_id: str,
-        name: str,
-        image_path: str,
-        media_type: str,
-        width: int,
-        height: int,
-        appearance: ThemeAppearance,
+        self, user_id: str, *, theme_id: str, name: str, image_path: str,
+        media_type: str, width: int, height: int, appearance: ThemeAppearance,
     ) -> UserTheme:
         now = utc_now()
         with self._lock, self._connection:
             self._execute(
-                """
-                INSERT INTO user_themes (id, owner_user_id, name, image_path, media_type, width, height, appearance, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
+                """INSERT INTO user_themes (id, owner_user_id, name, image_path, media_type, width, height, appearance, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (theme_id, user_id, name, image_path, media_type, width, height, appearance.value, now, now),
             )
         return self.get_user_theme(user_id, theme_id)

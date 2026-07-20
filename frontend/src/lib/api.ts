@@ -15,42 +15,171 @@ import type {
   ProviderModel,
   ProviderProfile,
   SearchResult,
-export function restoreCredentials(input: { password: string }): Promise<{ ok: boolean; restored: number }> {
-  return request<{ ok: boolean; restored: number }>("/api/v1/auth/restore-credentials", {
+  SearchResultKind,
+  ThemeAppearance,
+  ThemeListResponse,
+  UserTheme,
+  WebSearchConfig,
+  WorkbenchConversation,
+  WorkbenchMessage,
+  WorkbenchProject,
+} from "./types";
+
+let apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8765";
+
+let authToken: string | null = null;
+let appAuthSecret: string | null = null;
+const APP_AUTH_SECRET_STORAGE_KEY = "ai-workbench-app-auth-secret";
+const LOCAL_BACKEND_RETRY_ATTEMPTS = 10;
+const LOCAL_BACKEND_RETRY_DELAY_MS = 250;
+
+export function setApiBaseUrl(url: string | null | undefined): void {
+  if (url) apiBaseUrl = url.replace(/\/$/, "");
+}
+
+export function setAuthContext(next: { token?: string | null; appSecret?: string | null }): void {
+  if ("token" in next) authToken = next.token ?? null;
+  if ("appSecret" in next) {
+    appAuthSecret = next.appSecret ?? null;
+    if (typeof window !== "undefined") {
+      if (appAuthSecret) {
+        window.sessionStorage.setItem(APP_AUTH_SECRET_STORAGE_KEY, appAuthSecret);
+      } else {
+        window.sessionStorage.removeItem(APP_AUTH_SECRET_STORAGE_KEY);
+      }
+    }
+  }
+}
+
+function currentAppAuthSecret(): string | null {
+  if (appAuthSecret) return appAuthSecret;
+  if (typeof window === "undefined") return null;
+  appAuthSecret = window.sessionStorage.getItem(APP_AUTH_SECRET_STORAGE_KEY);
+  return appAuthSecret;
+}
+
+function withAuthHeaders(options?: RequestInit): RequestInit {
+  const headers = new Headers(options?.headers);
+  if (authToken) headers.set("Authorization", `Bearer ${authToken}`);
+  const secret = currentAppAuthSecret();
+  if (secret) headers.set("X-App-Auth-Secret", secret);
+  return { ...options, headers };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function localBackendConnectionError(): Error {
+  return new Error(`无法连接本地后端：${apiBaseUrl}。请确认桌面应用后端已启动，或检查当前页面地址是否被 CORS 允许。`);
+}
+
+async function fetchWithLocalRetry(url: string, options?: RequestInit): Promise<Response> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < LOCAL_BACKEND_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return await fetch(url, options);
+    } catch (caught) {
+      lastError = caught;
+      await sleep(LOCAL_BACKEND_RETRY_DELAY_MS);
+    }
+  }
+  throw lastError instanceof Error ? localBackendConnectionError() : localBackendConnectionError();
+}
+
+async function requestOnce(path: string, options?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(`${apiBaseUrl}${path}`, withAuthHeaders(options));
+  } catch {
+    throw localBackendConnectionError();
+  }
+}
+
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetchWithLocalRetry(`${apiBaseUrl}${path}`, withAuthHeaders(options));
+  } catch (error) {
+    throw localBackendConnectionError();
+  }
+  if (!response.ok) {
+    if (response.status === 401 && authToken && !path.startsWith("/api/v1/auth/")) {
+      window.dispatchEvent(new Event("ai-workbench-auth-expired"));
+    }
+    let detail = `请求失败：${response.status}`;
+    try {
+      const payload = await response.json();
+      detail = payload.detail ?? detail;
+    } catch {
+      // Keep the status fallback when the body is not JSON.
+    }
+    throw new Error(detail);
+  }
+  return response.json() as Promise<T>;
+}
+
+/** 单次请求，不重试。用于状态轮询场景，由外层控制重试节奏。 */
+async function quickRequest<T>(path: string, options?: RequestInit): Promise<T> {
+  const response = await requestOnce(path, options);
+  if (!response.ok) {
+    let detail = `请求失败：${response.status}`;
+    try {
+      const payload = await response.json();
+      detail = payload.detail ?? detail;
+    } catch {
+      // Keep the status fallback.
+    }
+    throw new Error(detail);
+  }
+  return response.json() as Promise<T>;
+}
+
+export function getHealth(): Promise<HealthResponse> {
+  return request<HealthResponse>("/health");
+}
+
+export function getAuthStatus(): Promise<AuthStatus> {
+  return quickRequest<AuthStatus>("/api/v1/auth/status");
+}
+
+export function registerAuth(input: { username: string; password: string }): Promise<AuthLoginResponse> {
+  return request<AuthLoginResponse>("/api/v1/auth/register", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   });
 }
 
-export function listThemes(): Promise<ThemeListResponse> {
-  return request<ThemeListResponse>("/api/v1/themes");
-}
-
-export function uploadTheme(input: { file: File; name?: string; appearance: ThemeAppearance }): Promise<UserTheme> {
-  const body = new FormData();
-  body.append("file", input.file);
-  body.append("name", input.name?.trim() || input.file.name.replace(/\.[^.]+$/, ""));
-  body.append("appearance", input.appearance);
-  return request<UserTheme>("/api/v1/themes", { method: "POST", body });
-}
-
-export function activateTheme(themeId: string): Promise<ThemeListResponse> {
-  return request<ThemeListResponse>("/api/v1/themes/active", {
-    method: "PATCH",
+export function loginAuth(input: { username: string; password: string }): Promise<AuthLoginResponse> {
+  return request<AuthLoginResponse>("/api/v1/auth/login", {
+    method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ theme_id: themeId }),
+    body: JSON.stringify(input),
   });
 }
 
-export function deleteTheme(themeId: string): Promise<{ ok: boolean }> {
-  return request<{ ok: boolean }>(`/api/v1/themes/${themeId}`, { method: "DELETE" });
+export function logoutAuth(): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>("/api/v1/auth/logout", { method: "POST" });
 }
 
-export async function downloadThemeImage(path: string): Promise<Blob> {
-  const response = await fetchWithLocalRetry(`${apiBaseUrl}${path}`, withAuthHeaders());
-  if (!response.ok) throw new Error("无法加载主题背景。");
-  return response.blob();
+export function getMe(): Promise<AuthUser> {
+  return request<AuthUser>("/api/v1/me");
+}
+
+export function changePassword(input: { current_password: string; new_password: string }): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>("/api/v1/auth/change-password", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export function restoreCredentials(input: { password: string }): Promise<{ ok: boolean; restored: number }> {
+  return request<{ ok: boolean; restored: number }>("/api/v1/auth/restore-credentials", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
 }
 
 export function listProjects(): Promise<WorkbenchProject[]> {
@@ -408,4 +537,34 @@ export async function streamBidWorkflow(
     throw localBackendConnectionError();
   }
 }
+export function listThemes(): Promise<ThemeListResponse> {
+  return request<ThemeListResponse>("/api/v1/themes");
+}
+
+export function uploadTheme(input: { file: File; name?: string; appearance: ThemeAppearance }): Promise<UserTheme> {
+  const body = new FormData();
+  body.append("file", input.file);
+  body.append("name", input.name?.trim() || input.file.name.replace(/\.[^.]+$/, ""));
+  body.append("appearance", input.appearance);
+  return request<UserTheme>("/api/v1/themes", { method: "POST", body });
+}
+
+export function activateTheme(themeId: string): Promise<ThemeListResponse> {
+  return request<ThemeListResponse>("/api/v1/themes/active", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ theme_id: themeId }),
+  });
+}
+
+export function deleteTheme(themeId: string): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`/api/v1/themes/${themeId}`, { method: "DELETE" });
+}
+
+export async function downloadThemeImage(path: string): Promise<Blob> {
+  const response = await fetchWithLocalRetry(`${apiBaseUrl}${path}`, withAuthHeaders());
+  if (!response.ok) throw new Error("无法加载主题背景。");
+  return response.blob();
+}
+
 import { fetchEventSource } from "@microsoft/fetch-event-source";

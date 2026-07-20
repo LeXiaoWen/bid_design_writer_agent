@@ -36,6 +36,41 @@ from .services.skill_loader import (
     skill_source_label,
 )
 from .services.workbench_store import db_path, workbench_store
+from .routers.auth import router as auth_router
+from .routers.dependencies import bearer_token
+from .routers.projects import router as projects_router
+from .routers.config import router as config_router
+from .routers.chat import router as chat_router
+from .routers.themes import router as themes_router
+from .routers.bid_workflows import create_router as create_bid_workflows_router
+from .routers.artifacts import create_router as create_artifacts_router
+
+load_dotenv()
+configure_logging()
+
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+CHUNK_NOTE_CHARACTER_LIMIT = 4_000
+logger = logging.getLogger("bid_design_writer.workflow")
+
+
+def get_cors_origins() -> list[str]:
+    raw = os.getenv("FRONTEND_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000,app://frontend,null")
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
+LOCAL_FRONTEND_ORIGIN_REGEX = r"^(https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?|app://frontend|null)$"
+
+
+app = FastAPI(title="AI Workbench Desktop Backend")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=get_cors_origins(),
+    allow_origin_regex=os.getenv("FRONTEND_ORIGIN_REGEX", LOCAL_FRONTEND_ORIGIN_REGEX),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    allow_private_network=True,
+)
 app.include_router(auth_router)
 app.include_router(projects_router)
 app.include_router(config_router)

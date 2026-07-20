@@ -31,21 +31,22 @@ import { ConfigDialog, type ProviderProfileDraft, type ProviderProfileValues, ty
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { AuthPanel, type AuthMode as AuthPanelMode } from "@/components/AuthPanel";
 import { BidWorkflowPanel } from "@/components/BidWorkflowPanel";
-import { WorkbenchSidebar } from "@/components/WorkbenchSidebar";
 import { ThemePanel } from "@/components/ThemePanel";
+import { WorkbenchSidebar } from "@/components/WorkbenchSidebar";
 import { useAuth } from "@/hooks/useAuth";
+import { useTheme } from "@/hooks/useTheme";
 import { useBidWorkflow, useBidWorkflows } from "@/hooks/useBidWorkflow";
 import { useChatStream } from "@/hooks/useChatStream";
 import { useConfiguration } from "@/hooks/useConfiguration";
 import { useProviderModels } from "@/hooks/useProviderModels";
 import { useWorkbenchData } from "@/hooks/useWorkbenchData";
-import { useTheme } from "@/hooks/useTheme";
 import type {
   BidWorkflow,
   BidWorkflowStreamEvent,
   ChatStreamEvent,
   SearchResult,
   SearchResultKind,
+  ThemeAppearance,
   WebSearchConfig,
   WorkbenchConversation,
   WorkbenchMessage,
@@ -192,6 +193,634 @@ export default function Home() {
     return recentConversations.filter((conversation) => conversation.project_id === defaultProject?.id);
   }, [defaultProject?.id, recentConversations]);
   const currentProfile = useMemo(() => profiles.find((profile) => profile.id === currentProfileId) ?? null, [profiles, currentProfileId]);
+  const configProfile = useMemo<ProviderProfileDraft>(
+    () => currentProfile ? { provider: currentProfile.provider, display_name: currentProfile.display_name, base_url: currentProfile.base_url, model: currentProfile.model } : providerPresets[0],
+    [currentProfile],
+  );
+  const { models: providerModels, isLoading: isLoadingModels, error: providerModelsError } = useProviderModels(currentProfileId, modelMenuOpen);
+
+  useEffect(() => {
+    void initializeAuth();
+  }, [initializeAuth]);
+
+  useEffect(() => {
+    if (authMode !== "ready" || currentProjectId || projects.length === 0) return;
+    const initialProject = projects.find((project) => !project.workspace_path && project.title === "默认项目") ?? projects.find((project) => !project.workspace_path) ?? projects[0];
+    setCurrentProjectId(initialProject.id);
+  }, [authMode, currentProjectId, projects]);
+
+  useEffect(() => {
+    if (authMode !== "ready" || currentProfileId || profiles.length === 0) return;
+    setCurrentProfileId(profiles[0].id);
+  }, [authMode, currentProfileId, profiles]);
+
+  useEffect(() => {
+    if (!configurationError) return;
+    setError(configurationError instanceof Error ? configurationError.message : String(configurationError));
+  }, [configurationError]);
+
+  useEffect(() => {
+    if (authMode !== "ready") {
+      initialConversationSelectedRef.current = false;
+      return;
+    }
+    if (initialConversationSelectedRef.current || currentConversationId || !currentProjectId || (projectConversations.length === 0 && recentConversations.length === 0)) return;
+    const firstConversation = recentConversations.find((conversation) => conversation.project_id === currentProjectId) ?? projectConversations[0];
+    if (!firstConversation) return;
+    initialConversationSelectedRef.current = true;
+    void openConversation(firstConversation.id);
+  }, [authMode, currentConversationId, currentProjectId, projectConversations, recentConversations]);
+
+  useEffect(() => {
+    const handleAuthExpired = () => {
+      void logoutUser();
+      setError("登录会话已失效，请重新登录。");
+    };
+    window.addEventListener("ai-workbench-auth-expired", handleAuthExpired);
+    return () => window.removeEventListener("ai-workbench-auth-expired", handleAuthExpired);
+  }, []);
+
+  useEffect(() => {
+    if (authMode !== "ready" || !error) return;
+    toast.error(error);
+    setError(null);
+  }, [authMode, error]);
+
+  useEffect(() => {
+    setUserChatAvatar(window.localStorage.getItem("bid-writer-user-avatar") || "我");
+    setAssistantChatAvatar(window.localStorage.getItem("bid-writer-assistant-avatar") || "AI");
+  }, []);
+
+  useEffect(() => {
+    setModelMenuOpen(false);
+  }, [currentProfileId]);
+
+  useEffect(() => {
+    if (!modelMenuOpen || !providerModelsError) return;
+    setModelMenuOpen(false);
+    setConfigOpen(true);
+    setUserPanelOpen(false);
+    setAttachmentMenuOpen(false);
+    setError(providerModelsError instanceof Error ? providerModelsError.message : String(providerModelsError));
+  }, [modelMenuOpen, providerModelsError]);
+
+  useEffect(() => {
+    if (webSearchConfig?.has_key === false && webSearchEnabled) {
+      setWebSearchEnabled(false);
+    }
+  }, [webSearchConfig?.has_key, webSearchEnabled]);
+
+  useEffect(() => {
+    const trimmed = searchQuery.trim();
+    if (!trimmed) {
+      setSearchResults([]);
+      return;
+    }
+    const timer = window.setTimeout(async () => {
+      try {
+        setSearchResults(await searchWorkbench(trimmed, searchKind === "all" ? undefined : searchKind));
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : String(caught));
+      }
+    }, 240);
+    return () => window.clearTimeout(timer);
+  }, [searchKind, searchQuery]);
+
+  useEffect(() => {
+    if (!polledBidWorkflows) return;
+    setBidWorkflows(polledBidWorkflows);
+    const activeWorkflow = activeBidWorkflow && polledBidWorkflows.find((workflow) => workflow.id === activeBidWorkflow.id);
+    if (activeWorkflow) setActiveBidWorkflow(activeWorkflow);
+    if (polledBidWorkflows.some((workflow) => ["extracting", "generating"].includes(workflow.status)) && currentConversationId) {
+      void refreshMessages(currentConversationId).catch((caught) => setError(caught instanceof Error ? caught.message : String(caught)));
+    }
+  }, [polledBidWorkflows, activeBidWorkflow?.id, currentConversationId, refreshMessages, setActiveBidWorkflow]);
+
+  useEffect(() => {
+    if (!workflowError) return;
+    setError(workflowError instanceof Error ? workflowError.message : String(workflowError));
+    setIsBidBusy(false);
+  }, [workflowError, setIsBidBusy]);
+
+  useEffect(() => {
+    if (!bidWorkflowsError) return;
+    setError(bidWorkflowsError instanceof Error ? bidWorkflowsError.message : String(bidWorkflowsError));
+  }, [bidWorkflowsError]);
+
+  useEffect(() => {
+    if (!activeBidWorkflow || !["extracting", "generating"].includes(activeBidWorkflow.status)) return;
+    const controller = new AbortController();
+    void streamBidWorkflow(activeBidWorkflow.id, (event: BidWorkflowStreamEvent) => {
+      updateMessages(event.data.conversation_id, (current) => applyBidWorkflowStreamEvent(current, event));
+    }, controller.signal).catch((caught) => {
+      if (!controller.signal.aborted) setError(caught instanceof Error ? caught.message : String(caught));
+    });
+    return () => controller.abort();
+  }, [activeBidWorkflow?.id, activeBidWorkflow?.status, updateMessages]);
+
+  async function switchProject(project: WorkbenchProject) {
+    setCurrentProjectId(project.id);
+    setProjectConversationsOpen(true);
+    setCurrentConversationId(null);
+    setActiveBidWorkflow(null);
+    setBidWorkflows([]);
+    await refreshConversations(project.id);
+  }
+
+  function toggleSidebar() {
+    if (sidebarCollapsed) {
+      sidebarPanelRef.current?.expand(22);
+    } else {
+      sidebarPanelRef.current?.collapse();
+    }
+  }
+
+  async function chooseWorkspaceDirectory() {
+    sidebarPanelRef.current?.expand(22);
+    setError(null);
+    const selected = await window.bidDesignWriterDesktop?.selectDirectory();
+    if (!selected) {
+      if (!window.bidDesignWriterDesktop) {
+        setError("当前运行环境不支持选择本地工作目录，请在桌面端使用。");
+      }
+      return;
+    }
+
+    try {
+      const latestProjects = await refreshProjects();
+      const existingProject = latestProjects.find((project) => project.workspace_path === selected.path);
+      if (existingProject) {
+        await switchProject(existingProject);
+        return;
+      }
+
+      const project = await createProjectMutation({ title: selected.name || "未命名项目", workspace_path: selected.path });
+      await refreshProjects();
+      await switchProject(project);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  async function openConversation(conversationId: string) {
+    const targetConversation = [...projectConversations, ...recentConversations].find((conversation) => conversation.id === conversationId);
+    if (targetConversation?.project_id && targetConversation.project_id !== currentProjectId) {
+      setCurrentProjectId(targetConversation.project_id);
+      void refreshConversations(targetConversation.project_id);
+    }
+    setCurrentConversationId(conversationId);
+    const [, workflows] = await Promise.all([refreshMessages(conversationId), listBidWorkflows(conversationId)]);
+    setBidWorkflows(workflows);
+    const workflow = workflows[0] ?? null;
+    setActiveBidWorkflow(workflow);
+    setError(null);
+  }
+
+  async function removeProject(project: WorkbenchProject) {
+    if (!window.confirm(`删除项目“${project.title}”？项目下的对话也会被删除。`)) return;
+    try {
+      await deleteProjectMutation(project.id);
+      const nextProjects = await refreshProjects();
+      const nextDefaultProject = nextProjects.find((item) => !item.workspace_path && item.title === "默认项目") ?? nextProjects.find((item) => !item.workspace_path);
+      const nextProjectId = project.id === currentProjectId ? nextDefaultProject?.id ?? nextProjects[0]?.id ?? null : currentProjectId;
+      setCurrentProjectId(nextProjectId);
+      await refreshConversations(nextProjectId);
+      if (project.id === currentProjectId) {
+        setCurrentConversationId(null);
+        setActiveBidWorkflow(null);
+        setBidWorkflows([]);
+      }
+      setError(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  async function removeConversation(conversation: WorkbenchConversation) {
+    if (!window.confirm(`删除对话“${conversation.title}”？`)) return;
+    try {
+      await deleteConversationMutation(conversation.id);
+      await refreshConversations(currentProjectId);
+      if (conversation.id === currentConversationId) {
+        setCurrentConversationId(null);
+        setActiveBidWorkflow(null);
+        setBidWorkflows([]);
+      }
+      setError(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  async function startNewChat() {
+    setError(null);
+    try {
+      const latestProjects = projects.length > 0 ? projects : await refreshProjects();
+      const targetProject = latestProjects.find((project) => !project.workspace_path && project.title === "默认项目") ?? latestProjects.find((project) => !project.workspace_path);
+      const conversation = await createConversationMutation({
+        project_id: targetProject?.id,
+        title: "新对话",
+        provider_profile_id: currentProfileId ?? undefined,
+        model: currentProfile?.model,
+      });
+      await refreshProjects();
+      setCurrentProjectId(conversation.project_id);
+      setCurrentConversationId(conversation.id);
+      setActiveBidWorkflow(null);
+      setBidWorkflows([]);
+      setInput("");
+      await refreshConversations(conversation.project_id);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  async function ensureConversation(text: string) {
+    if (currentConversationId) return currentConversationId;
+    const conversation = await createConversationMutation({
+      project_id: currentProjectId ?? undefined,
+      title: text.slice(0, 32) || "新对话",
+      provider_profile_id: currentProfileId ?? undefined,
+      model: currentProfile?.model,
+    });
+    setCurrentConversationId(conversation.id);
+    await refreshConversations(conversation.project_id);
+    return conversation.id;
+  }
+
+  async function sendMessage(event?: FormEvent) {
+    event?.preventDefault();
+    const text = input.trim();
+    if (!text || isStreaming) return;
+    setError(null);
+
+    if (!currentProfileId) {
+      setConfigOpen(true);
+      setError("请先配置模型 API。");
+      return;
+    }
+    if (webSearchEnabled && !webSearchConfig?.has_key) {
+      setConfigOpen(true);
+      setError("请先在模型配置中填写 Tavily API key。");
+      return;
+    }
+
+    const conversationId = await ensureConversation(text);
+    setInput("");
+    updateMessages(conversationId, (current) => [...current, localMessage("user", text, "completed")]);
+    try {
+      await sendChatStream(
+        {
+          conversation_id: conversationId,
+          project_id: currentProjectId ?? undefined,
+          provider_profile_id: currentProfileId,
+          message: text,
+          web_search_enabled: webSearchEnabled,
+        },
+        handleStreamEvent,
+      );
+      await refreshConversations(currentProjectId);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setActiveRunId(null);
+    }
+  }
+
+  function handleStreamEvent(event: ChatStreamEvent) {
+    if (event.event === "message_start") {
+      setActiveRunId(event.data.run_id);
+      setCurrentConversationId(event.data.conversation_id);
+      updateMessages(event.data.conversation_id, (current) => applyChatStreamEvent(current, event));
+      return;
+    }
+
+    if (event.event === "delta" || event.event === "message_done") {
+      updateMessages(event.data.conversation_id, (current) => applyChatStreamEvent(current, event));
+      return;
+    }
+
+    if (event.event === "conversation_updated") {
+      void refreshConversations(event.data.project_id);
+      return;
+    }
+
+    if (event.event === "error") {
+      setError(event.data.message);
+      if (event.data.message_id && event.data.conversation_id) {
+        updateMessages(event.data.conversation_id, (current) => applyChatStreamEvent(current, event));
+      }
+    }
+
+    if (event.event === "warning") {
+      setError(event.data.message);
+    }
+  }
+
+  async function stopStreaming() {
+    abortChatStream();
+    if (!activeRunId) return;
+    await cancelChat(activeRunId);
+  }
+
+  async function refreshWorkflowMessages(workflow: BidWorkflow) {
+    const [refreshedWorkflow, workflows] = await Promise.all([getBidWorkflow(workflow.id), listBidWorkflows(workflow.conversation_id)]);
+    setBidWorkflows(workflows);
+    setActiveBidWorkflow(refreshedWorkflow);
+    setCurrentConversationId(refreshedWorkflow.conversation_id);
+    await refreshMessages(refreshedWorkflow.conversation_id);
+    await refreshConversations(currentProjectId);
+  }
+
+  async function uploadTenderFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || uploadProgress !== null) return;
+    setError(null);
+
+    if (!currentProfileId) {
+      openConfigPanel();
+      setError("请先配置模型 API。");
+      return;
+    }
+    setIsBidBusy(true);
+    setUploadFileName(file.name);
+    setUploadProgress(0);
+    try {
+      const conversationId = await ensureConversation(file.name.replace(/\.[^.]+$/, "") || file.name);
+      const workflow = await createBidWorkflow({
+        conversation_id: conversationId,
+        provider_profile_id: currentProfileId,
+        file,
+        onProgress: setUploadProgress,
+      });
+      setActiveBidWorkflow(workflow);
+      setBidWorkflows((current) => [workflow, ...current.filter((item) => item.id !== workflow.id)]);
+      setBidConfirmation("确认");
+      setBidExtraContext("");
+      await refreshWorkflowMessages(workflow);
+      setUploadProgress(null);
+      setUploadFileName("");
+      const extraction = await extractBidWorkflow(workflow.id);
+      setActiveBidWorkflow(extraction.workflow);
+      await refreshWorkflowMessages(extraction.workflow);
+    } catch (caught) {
+      setIsBidBusy(false);
+      setUploadProgress(null);
+      setUploadFileName("");
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  async function confirmWorkflow() {
+    if (!activeBidWorkflow || isBidBusy) return;
+    setIsBidBusy(true);
+    setError(null);
+    try {
+      const response = await confirmBidWorkflow(activeBidWorkflow.id, bidConfirmation.trim() || "确认");
+      setActiveBidWorkflow(response.workflow);
+      await refreshWorkflowMessages(response.workflow);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setIsBidBusy(false);
+    }
+  }
+
+  async function generateWorkflow() {
+    if (!activeBidWorkflow || isBidBusy) return;
+    setIsBidBusy(true);
+    setError(null);
+    try {
+      const response = await generateBidWorkflow(activeBidWorkflow.id, {
+        extra_context: bidExtraContext.trim() || undefined,
+      });
+      setActiveBidWorkflow(response.workflow);
+      await refreshWorkflowMessages(response.workflow);
+    } catch (caught) {
+      setIsBidBusy(false);
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  async function retryWorkflow() {
+    if (!activeBidWorkflow || isBidBusy) return;
+    setIsBidBusy(true);
+    setError(null);
+    try {
+      const response = activeBidWorkflow.extracted_markdown
+        ? await generateBidWorkflow(activeBidWorkflow.id, {
+            extra_context: bidExtraContext.trim() || undefined,
+          })
+        : await extractBidWorkflow(activeBidWorkflow.id);
+      setActiveBidWorkflow(response.workflow);
+      await refreshWorkflowMessages(response.workflow);
+    } catch (caught) {
+      setIsBidBusy(false);
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  async function cancelWorkflow() {
+    if (!activeBidWorkflow) return;
+    setError(null);
+    try {
+      const response = await cancelBidWorkflow(activeBidWorkflow.id);
+      setActiveBidWorkflow(response.workflow);
+      setIsBidBusy(false);
+      await refreshWorkflowMessages(response.workflow);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  async function refreshActiveWorkflow() {
+    if (!activeBidWorkflow) return;
+    try {
+      const workflow = await getBidWorkflow(activeBidWorkflow.id);
+      setActiveBidWorkflow(workflow);
+      await refreshWorkflowMessages(workflow);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  function saveBlob(blob: Blob, filename: string) {
+    const url = window.URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.URL.revokeObjectURL(url);
+  }
+
+  function downloadBaseName() {
+    return sanitizeFilename(currentProject?.title || stripExtension(activeBidWorkflow?.file_name ?? "") || currentConversation?.title || "标书项目");
+  }
+
+  function artifactDownloadName(artifactName: string) {
+    const ext = artifactName.includes(".") ? artifactName.slice(artifactName.lastIndexOf(".")) : ".md";
+    const suffix = artifactName.includes("信息提取")
+      ? "招标文件信息提取"
+      : artifactName.includes("绘图") || artifactName.includes("图纸") || artifactName.includes("图文证据")
+        ? "图文证据与图纸需求"
+        : artifactName.includes("规范")
+          ? "标书制作规范"
+          : "设计方案";
+    return `${downloadBaseName()}_${suffix}${ext}`;
+  }
+
+  async function downloadArtifact(artifactName: string) {
+    if (!activeBidWorkflow) return;
+    try {
+      const blob = await downloadBidArtifact(activeBidWorkflow.id, artifactName);
+      saveBlob(blob, artifactDownloadName(artifactName));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  async function downloadArtifactsZip() {
+    if (!activeBidWorkflow) return;
+    try {
+      const blob = await downloadBidZip(activeBidWorkflow.id);
+      saveBlob(blob, `${downloadBaseName()}_标书成果.zip`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  async function saveProfile(values: ProviderProfileValues) {
+    try {
+      const existing = currentProfileId ? profiles.find((profile) => profile.id === currentProfileId) : null;
+      const payload = { ...values, api_key: values.api_key || undefined };
+      const profile = existing ? await updateProfile(existing.id, payload) : await createProfile(payload);
+      setCurrentProfileId(profile.id);
+      setConfigOpen(false);
+      setError(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    }
+  }
+
+  async function saveWebSearchConfig(values: WebSearchValues): Promise<WebSearchConfig> {
+    try {
+      const apiKeyValue = values.api_key.trim();
+      const updated = await updateWebSearch({
+        api_key: apiKeyValue || undefined,
+        max_results: Number(values.max_results),
+        search_depth: values.search_depth,
+      });
+      setError(null);
+      return updated;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    }
+  }
+
+  function openConfigPanel() {
+    setConfigOpen(true);
+    setUserPanelOpen(false);
+    setModelMenuOpen(false);
+    setAttachmentMenuOpen(false);
+  }
+
+  function toggleUserPanel() {
+    setConfigOpen(false);
+    setModelMenuOpen(false);
+    setAttachmentMenuOpen(false);
+    setUserPanelOpen((current) => !current);
+  }
+
+  function updateChatAvatar(kind: "user" | "assistant", value: string) {
+    if (kind === "user") {
+      setUserChatAvatar(value);
+      window.localStorage.setItem("bid-writer-user-avatar", value);
+      return;
+    }
+    setAssistantChatAvatar(value);
+    window.localStorage.setItem("bid-writer-assistant-avatar", value);
+  }
+
+  async function submitAuth(mode: AuthPanelMode, values: { username: string; password: string; confirmPassword: string }) {
+    await submitAuthRequest(mode, { username: values.username, password: values.password });
+  }
+
+  async function changeCurrentPassword(values: PasswordChangeValues) {
+    passwordChangeForm.clearErrors("root");
+    try {
+      await changePassword({
+        current_password: values.currentPassword,
+        new_password: values.newPassword,
+      });
+      await logoutUser();
+      setError("密码已修改，请重新登录。");
+    } catch (caught) {
+      passwordChangeForm.setError("root", { message: caught instanceof Error ? caught.message : String(caught) });
+    }
+  }
+
+  async function restoreLegacyCredentials() {
+    const password = passwordChangeForm.getValues("currentPassword");
+    if (!password) {
+      passwordChangeForm.setError("currentPassword", { message: "请输入当前密码后再恢复。" });
+      return;
+    }
+    passwordChangeForm.clearErrors("root");
+    try {
+      const { restored } = await restoreCredentials({ password });
+      await refreshConfiguration();
+      toast.success(restored ? `已恢复 ${restored} 项旧密钥。` : "未找到可恢复的旧密钥。");
+    } catch (caught) {
+      passwordChangeForm.setError("root", { message: caught instanceof Error ? caught.message : String(caught) });
+    }
+  }
+
+  async function logoutUser() {
+    await logoutAuthSession();
+    setUserPanelOpen(false);
+    clearWorkbenchData();
+    clearConfiguration();
+    setWebSearchEnabled(false);
+    setCurrentProjectId(null);
+    setCurrentConversationId(null);
+    setCurrentProfileId(null);
+    setActiveBidWorkflow(null);
+    setBidWorkflows([]);
+    passwordChangeForm.reset();
+  }
+
+  async function openModelMenu() {
+    setAttachmentMenuOpen(false);
+    if (!currentProfileId) {
+      openConfigPanel();
+      setError("请先配置模型 API。");
+      return;
+    }
+    if (modelMenuOpen) {
+      setModelMenuOpen(false);
+      return;
+    }
+    setModelMenuOpen(true);
+    setError(null);
+  }
+
+  async function chooseModel(modelId: string) {
+    if (!currentProfileId || !currentProfile) return;
+    try {
+      const updated = await updateProfile(currentProfileId, { model: modelId });
+      setCurrentProfileId(updated.id);
+      setModelMenuOpen(false);
+      setError(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
   const workflowPanel = (
     <BidWorkflowPanel
       workflow={activeBidWorkflow}
@@ -212,6 +841,26 @@ export default function Home() {
       onDownloadZip={downloadArtifactsZip}
     />
   );
+
+  const workspaceMode = activeBidWorkflow ? "workflow" : messages.length > 0 ? "work" : "welcome";
+  const themeStyle = useMemo(() => ({
+    ...theme.presentation.palette,
+    "--theme-art": theme.imageUrl ? `url("${theme.imageUrl}")` : "none",
+    "--theme-focus-x": theme.presentation.focusX,
+    "--theme-focus-y": theme.presentation.focusY,
+  } as CSSProperties), [theme.imageUrl, theme.presentation]);
+  const themeShellAttrs = useMemo(() => {
+    if (theme.activeTheme?.source !== "custom") return {};
+    return {
+      "data-theme-safe": theme.presentation.safeArea,
+      "data-theme-aspect": theme.presentation.wide ? "wide" : "normal",
+      "data-theme-task": theme.presentation.taskMode,
+    };
+  }, [theme.activeTheme?.source, theme.presentation]);
+
+  async function activateAppTheme(tid: string) { try { await theme.activate(tid); } catch (e: any) { setError(e?.message ?? String(e)); } }
+  async function uploadAppTheme(file: File, appearance: ThemeAppearance) { try { await theme.upload(file, appearance); toast.success("主题已启用"); } catch (e: any) { setError(e?.message ?? String(e)); } }
+  async function removeAppTheme(tid: string) { try { await theme.remove(tid); toast.success("主题已删除"); } catch (e: any) { setError(e?.message ?? String(e)); } }
 
   if (authMode !== "ready") {
     return <AuthPanel mode={authMode} backendReady={authBackendReady} error={error} onModeChange={switchAuthMode} onSubmit={submitAuth} />;
