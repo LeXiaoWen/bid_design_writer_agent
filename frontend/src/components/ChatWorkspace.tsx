@@ -136,7 +136,7 @@ export function ChatWorkspace({
   const composerControls = (
     <div className="composer-toolbar">
       <div className="toolbar-left">
-        <input ref={fileInputRef} type="file" accept=".pdf,.doc,.docx,.xlsx,.txt,.md" className="hidden-file-input" onChange={onUploadTenderFile} />
+        <input ref={fileInputRef} type="file" accept=".pdf,.docx,.xlsx,.txt,.md" className="hidden-file-input" onChange={onUploadTenderFile} />
         <DropdownMenu.Root open={attachmentMenuOpen} onOpenChange={onAttachmentMenuOpenChange}>
           <DropdownMenu.Trigger asChild><button type="button" className="attachment-add-button" disabled={isUploadingTender} aria-label="添加"><Plus size={18} /></button></DropdownMenu.Trigger>
           <DropdownMenu.Portal>
@@ -174,7 +174,7 @@ export function ChatWorkspace({
         <DropdownMenu.Root open={modelMenuOpen} onOpenChange={onModelMenuOpenChange}>
           <DropdownMenu.Trigger asChild>
             <button type="button" className="model-select">
-              {currentProfileModel ?? "选择模型"}
+              {isConfigured ? currentProfileModel ?? "选择模型" : "选择模型"}
               <ChevronRight className={modelMenuOpen ? "chevron open" : "chevron"} size={15} />
             </button>
           </DropdownMenu.Trigger>

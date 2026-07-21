@@ -138,7 +138,7 @@ textarea:focus {
 }
 
 /* 工作区模式：用 ::after 叠加半透明层降低背景视觉强度 */
-/* 工作模式：::after 加重遮罩保证内容可读 */
+/* 工作模式：::after 轻度加重遮罩，仅比欢迎模式略高，保留安全区域感知渐变方向 */
 .workbench-shell[data-theme="custom"][data-theme-mode="work"]::after,
 .workbench-shell[data-theme="custom"][data-theme-mode="workflow"]::after {
   content: "";
@@ -146,7 +146,43 @@ textarea:focus {
   z-index: 0;
   inset: 0;
   pointer-events: none;
-  background: color-mix(in srgb, var(--theme-bg) 72%, transparent);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--theme-bg) 50%, transparent) 0%,
+    color-mix(in srgb, var(--theme-bg) 25%, transparent) 40%,
+    color-mix(in srgb, var(--theme-bg) 10%, transparent) 72%,
+    transparent 100%
+  );
+}
+
+/* work/workflow 模式 + safeArea=right：遮罩从右向左 */
+.workbench-shell[data-theme="custom"][data-theme-safe="right"][data-theme-mode="work"]::after,
+.workbench-shell[data-theme="custom"][data-theme-safe="right"][data-theme-mode="workflow"]::after {
+  background: linear-gradient(
+    270deg,
+    color-mix(in srgb, var(--theme-bg) 50%, transparent) 0%,
+    color-mix(in srgb, var(--theme-bg) 25%, transparent) 40%,
+    color-mix(in srgb, var(--theme-bg) 10%, transparent) 72%,
+    transparent 100%
+  );
+}
+
+/* work/workflow 模式 + safeArea=center：两侧轻度遮罩 */
+.workbench-shell[data-theme="custom"][data-theme-safe="center"][data-theme-mode="work"]::after,
+.workbench-shell[data-theme="custom"][data-theme-safe="center"][data-theme-mode="workflow"]::after {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--theme-bg) 34%, transparent) 28%,
+    color-mix(in srgb, var(--theme-bg) 34%, transparent) 72%,
+    transparent 100%
+  );
+}
+
+/* work/workflow 模式 + safeArea=none：极轻均匀遮罩 */
+.workbench-shell[data-theme="custom"][data-theme-safe="none"][data-theme-mode="work"]::after,
+.workbench-shell[data-theme="custom"][data-theme-safe="none"][data-theme-mode="workflow"]::after {
+  background: color-mix(in srgb, var(--theme-bg) 18%, transparent);
 }
 
 /* 侧栏和聊天区：半透明面板，背景图清晰透出 */
@@ -158,11 +194,11 @@ textarea:focus {
   background: color-mix(in srgb, var(--theme-panel) 38%, transparent);
 }
 
-/* 工作模式下面板更不透明，保护阅读体验 */
+/* 工作模式下面板适度增加不透明度和轻微模糊，在可读性与背景可见之间平衡 */
 .workbench-shell[data-theme="custom"][data-theme-mode="work"] .chat-workspace,
 .workbench-shell[data-theme="custom"][data-theme-mode="workflow"] .chat-workspace {
-  background: color-mix(in srgb, var(--theme-panel) 82%, transparent);
-  backdrop-filter: blur(8px) saturate(105%);
+  background: color-mix(in srgb, var(--theme-panel) 52%, transparent);
+  backdrop-filter: blur(4px) saturate(105%);
 }
 
 .workbench-shell[data-theme="custom"] .composer,
@@ -392,6 +428,36 @@ textarea:focus {
 /* Markdown 内容区 */
 .workbench-shell[data-theme="custom"] .markdown-pane {
   color: var(--theme-text);
+}
+
+/* 自定义主题下的表格适配 */
+.workbench-shell[data-theme="custom"] .markdown-table-wrap {
+  background: color-mix(in srgb, var(--theme-panel) 78%, transparent);
+}
+
+.workbench-shell[data-theme="custom"] .markdown-table-wrap thead th,
+.workbench-shell[data-theme="custom"] .markdown-table-wrap tr:first-child th,
+.workbench-shell[data-theme="custom"] .markdown-table-wrap th {
+  background: color-mix(in srgb, var(--theme-panel) 88%, transparent);
+  color: var(--theme-text);
+  border-color: color-mix(in srgb, var(--theme-muted) 32%, transparent);
+}
+
+.workbench-shell[data-theme="custom"] .markdown-table-wrap tbody td,
+.workbench-shell[data-theme="custom"] .markdown-table-wrap td {
+  background: color-mix(in srgb, var(--theme-panel) 72%, transparent);
+  border-color: color-mix(in srgb, var(--theme-muted) 24%, transparent);
+  color: var(--theme-text);
+}
+
+.workbench-shell[data-theme="custom"] .markdown-table-wrap tbody tr:nth-child(even) td,
+.workbench-shell[data-theme="custom"] .markdown-table-wrap tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--theme-muted) 12%, var(--theme-panel));
+}
+
+.workbench-shell[data-theme="custom"] .markdown-table-wrap tbody tr:hover td,
+.workbench-shell[data-theme="custom"] .markdown-table-wrap tr:hover td {
+  background: color-mix(in srgb, var(--theme-accent) 16%, var(--theme-panel));
 }
 
 /* 文件上传进度 */
@@ -890,7 +956,7 @@ textarea:focus {
   border: 1px solid rgba(143, 161, 173, 0.18) !important;
   border-radius: 10px !important;
   background: rgba(255, 255, 255, 0.3) !important;
-  color: #596771 !important;
+  color: #596771;
   font-size: 13px !important;
   font-weight: 720 !important;
 }
@@ -941,7 +1007,7 @@ textarea:focus {
   min-height: 30px !important;
   border-radius: 10px !important;
   padding: 0 8px 0 31px !important;
-  color: #333d45 !important;
+  color: #333d45;
   font-size: 13px !important;
   font-weight: 620 !important;
   line-height: 1.2;
@@ -1578,15 +1644,15 @@ textarea:focus {
 }
 
 .message-list-header {
-  padding: 80px min(8vw, 120px) 28px;
+  padding: 80px 24px 28px;
 }
 
 .message-list-footer {
-  padding: 0 min(8vw, 120px) 26px;
+  padding: 0 24px 26px;
 }
 
 .conversation-title {
-  max-width: 820px;
+  max-width: 1060px;
   margin: 0 auto 28px;
 }
 
@@ -1604,7 +1670,7 @@ textarea:focus {
 .workflow-panel {
   display: grid;
   gap: 14px;
-  max-width: 820px;
+  max-width: 1060px;
   margin: 0 auto 22px;
   border: 1px solid #e5e8ea;
   border-radius: 14px;
@@ -1776,12 +1842,12 @@ textarea:focus {
   display: grid;
   grid-template-columns: 32px minmax(0, 1fr);
   gap: 12px;
-  max-width: 820px;
+  max-width: 1060px;
   margin: 0 auto 18px;
 }
 
 .virtual-message-row {
-  padding: 0 min(8vw, 120px);
+  padding: 0 24px;
 }
 
 .message-row.user {
@@ -1936,14 +2002,93 @@ textarea:focus {
 }
 
 .markdown-table-wrap {
-  width: 100%;
+  width: fit-content;
+  max-width: 100%;
   overflow-x: auto;
-  margin: 16px 0;
+  margin: 16px auto;
+  border-radius: 10px;
+  background: #ffffff;
 }
 
 .markdown-table-wrap table {
-  min-width: 640px;
-  margin: 0 !important;
+  width: auto;
+  min-width: min-content;
+  margin: 0 auto;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+/* 圆角容器内表格四角与容器圆角对齐 */
+.markdown-table-wrap thead th:first-child,
+.markdown-table-wrap tr:first-child th:first-child,
+.markdown-table-wrap tr:first-child td:first-child {
+  border-top-left-radius: 10px;
+}
+
+.markdown-table-wrap thead th:last-child,
+.markdown-table-wrap tr:first-child th:last-child,
+.markdown-table-wrap tr:first-child td:last-child {
+  border-top-right-radius: 10px;
+}
+
+.markdown-table-wrap tbody tr:last-child td:first-child,
+.markdown-table-wrap tr:last-child td:first-child {
+  border-bottom-left-radius: 10px;
+}
+
+.markdown-table-wrap tbody tr:last-child td:last-child,
+.markdown-table-wrap tr:last-child td:last-child {
+  border-bottom-right-radius: 10px;
+}
+
+/* ---- 表头 ---- */
+.markdown-table-wrap thead th,
+.markdown-table-wrap tr:first-child th,
+.markdown-table-wrap th {
+  padding: 10px 14px;
+  background: #e4e9ee;
+  color: #1a2128;
+  font-weight: 760;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  text-align: left;
+  white-space: normal;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+  border: 1px solid #c4cacf;
+  border-bottom-width: 2px;
+}
+
+/* ---- 数据单元格 ---- */
+.markdown-table-wrap tbody td,
+.markdown-table-wrap td {
+  padding: 9px 14px;
+  border: 1px solid #d6dbe1;
+  color: #22282f;
+  vertical-align: top;
+  white-space: normal;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+
+/* ---- 隔行条纹：只对 td 生效，自动排除表头行 ---- */
+.markdown-table-wrap tbody tr:nth-child(even) td,
+.markdown-table-wrap tr:nth-child(even) td {
+  background: #f3f6f8;
+}
+
+/* ---- 行 hover ---- */
+.markdown-table-wrap tbody tr:hover td,
+.markdown-table-wrap tr:hover td {
+  background: #e6edf2;
+}
+
+/* 表格窄列时避免过度拉伸，优先按内容自然宽度 */
+.markdown-table-wrap td,
+.markdown-table-wrap th {
+  min-width: 96px;
 }
 
 .empty-state {

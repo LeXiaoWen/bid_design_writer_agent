@@ -57,52 +57,6 @@ def test_parse_xlsx_document():
     assert "XLSX 项目" in parsed
 
 
-def test_parse_legacy_doc_uses_converter(monkeypatch):
-    monkeypatch.setattr(document_parser, "_parse_legacy_doc", lambda _: "项目名称：DOC 项目")
-
-    assert parse_document("招标.doc", document_parser.DOC_SIGNATURE + b"legacy") == "项目名称：DOC 项目"
-
-
-def test_bundled_legacy_doc_converter_is_preferred_in_frozen_agent(tmp_path, monkeypatch):
-    converter_dir = tmp_path / "doc-converter"
-    converter_dir.mkdir()
-    converter = converter_dir / "program" / "soffice"
-    converter.parent.mkdir()
-    converter.write_text("", encoding="utf-8")
-    (converter_dir / "converter.json").write_text(json.dumps({"executable": "program/soffice"}), encoding="utf-8")
-    monkeypatch.setattr(document_parser, "_agent_resource_dir", lambda: tmp_path)
-    monkeypatch.setattr(document_parser.sys, "frozen", True, raising=False)
-    monkeypatch.delenv("AI_WORKBENCH_DOC_CONVERTER", raising=False)
-
-    assert document_parser._find_legacy_doc_converter() == str(converter.resolve())
-
-
-def test_legacy_doc_converter_ignores_runtime_executable_override(monkeypatch):
-    monkeypatch.setenv("AI_WORKBENCH_DOC_CONVERTER", "/tmp/untrusted-converter")
-    monkeypatch.setattr(document_parser, "_bundled_legacy_doc_converter", lambda: None)
-    monkeypatch.setattr(document_parser.sys, "frozen", True, raising=False)
-
-    assert document_parser._find_legacy_doc_converter() is None
-
-
-def test_legacy_doc_converter_uses_restricted_environment(monkeypatch):
-    captured = {}
-
-    def fake_run(command, **kwargs):
-        captured["command"] = command
-        captured["options"] = kwargs
-        return SimpleNamespace(stdout=b"DOC text", returncode=0)
-
-    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid")
-    monkeypatch.setattr(document_parser, "_find_legacy_doc_converter", lambda: "/usr/bin/textutil")
-    monkeypatch.setattr(document_parser.subprocess, "run", fake_run)
-
-    assert document_parser._parse_legacy_doc(document_parser.DOC_SIGNATURE + b"legacy") == "DOC text"
-    assert captured["options"]["start_new_session"] is True
-    assert captured["options"]["cwd"] == captured["options"]["env"]["HOME"]
-    assert "HTTP_PROXY" not in captured["options"]["env"]
-
-
 def test_ocr_rejects_oversized_page_before_rendering(monkeypatch):
     class FakePage:
         rect = SimpleNamespace(width=10_000, height=10_000)

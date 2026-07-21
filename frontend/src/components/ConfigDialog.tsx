@@ -25,7 +25,7 @@ export type WebSearchValues = {
   search_depth: "basic" | "advanced";
 };
 
-const profileSchema = z.object({
+const profileSchema = (hasKey: boolean) => z.object({
   provider: z.string().trim().min(1, "请选择 Provider。"),
   display_name: z.string().trim().min(1, "请输入显示名称。"),
   base_url: z.string().trim().url("请输入有效的 Base URL。").refine((value) => {
@@ -36,7 +36,7 @@ const profileSchema = z.object({
     }
   }, "Base URL 必须使用 HTTPS。"),
   model: z.string().trim().min(1, "请输入模型名称。"),
-  api_key: z.string(),
+  api_key: hasKey ? z.string() : z.string().trim().min(1, "请输入 API key。"),
 });
 
 const webSearchSchema = z.object({
@@ -50,6 +50,7 @@ type ConfigDialogProps = {
   onOpenChange: (open: boolean) => void;
   presets: readonly ProviderProfileDraft[];
   profile: ProviderProfileDraft;
+  hasKey?: boolean;
   onSaveProfile: (values: ProviderProfileValues) => Promise<void>;
   webSearchConfig: WebSearchConfig | null;
   onSaveWebSearch: (values: WebSearchValues) => Promise<WebSearchConfig>;
@@ -63,8 +64,8 @@ function webSearchValues(config: WebSearchConfig | null): WebSearchValues {
   return { api_key: "", max_results: String(config?.max_results ?? 5), search_depth: config?.search_depth === "advanced" ? "advanced" : "basic" };
 }
 
-export function ConfigDialog({ open, onOpenChange, presets, profile, onSaveProfile, webSearchConfig, onSaveWebSearch }: ConfigDialogProps) {
-  const profileForm = useForm<ProviderProfileValues>({ resolver: zodResolver(profileSchema), defaultValues: profileValues(profile) });
+export function ConfigDialog({ open, onOpenChange, presets, profile, hasKey = false, onSaveProfile, webSearchConfig, onSaveWebSearch }: ConfigDialogProps) {
+  const profileForm = useForm<ProviderProfileValues>({ resolver: zodResolver(profileSchema(hasKey)), defaultValues: profileValues(profile) });
   const webSearchForm = useForm<WebSearchValues>({ resolver: zodResolver(webSearchSchema), defaultValues: webSearchValues(webSearchConfig) });
   const [webSearchMessage, setWebSearchMessage] = useState("");
 
@@ -147,7 +148,8 @@ export function ConfigDialog({ open, onOpenChange, presets, profile, onSaveProfi
                 </label>
                 <label className={styles.apiKeyField}>
                   API key
-                  <input {...profileForm.register("api_key")} type="password" placeholder="保存到当前账号本地数据库" />
+                  <input {...profileForm.register("api_key")} type="password" placeholder={hasKey ? "留空则保留已有 key" : "请输入模型 API key"} />
+                  {profileForm.formState.errors.api_key && <small className={styles.fieldError}>{profileForm.formState.errors.api_key.message}</small>}
                 </label>
               </div>
               {profileForm.formState.errors.root && <div className={`${styles.message} ${styles.error}`}>{profileForm.formState.errors.root.message}</div>}

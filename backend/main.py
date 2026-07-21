@@ -45,7 +45,7 @@ from .routers.themes import router as themes_router
 from .routers.bid_workflows import create_router as create_bid_workflows_router
 from .routers.artifacts import create_router as create_artifacts_router
 
-load_dotenv()
+load_dotenv(override=False)
 configure_logging()
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024

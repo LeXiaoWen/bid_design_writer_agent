@@ -152,17 +152,6 @@ packaging/icons/icon.ico   # Windows
 
 根目录 `package.json` 的 `version` 是唯一发布版本源：Electron 应用元数据、安装包文件名和后端 `/health` 返回值均以它为准。前端 `package.json` 与两个 lockfile 由 `npm run sync:version` 自动同步，不能单独修改版本。
 
-### 旧版 DOC 打包转换器
-
-正式安装包会把 LibreOffice headless 一并放入后端 agent，避免依赖终端用户安装系统转换器。打包机器需提供目标系统的 LibreOffice 目录；可写入本地 `.env`（`npm run pack` 或 `npm run dist:*` 会自动读取），或在执行前导出：
-
-```bash
-export DOC_CONVERTER_DIR="/path/to/LibreOffice"
-export DOC_CONVERTER_EXECUTABLE="Contents/MacOS/soffice"
-```
-
-Windows 常用相对路径为 `program/soffice.exe`，Linux 常用相对路径为 `program/soffice`。发布打包缺少这两个变量会失败；开发模式仍可使用系统安装的 `soffice`、`libreoffice` 或 macOS `textutil`。
-
 版本采用 SemVer：修复使用 `patch`，新增兼容功能使用 `minor`，不兼容变更使用 `major`。发布时在目标平台完成构建：
 
 ```bash

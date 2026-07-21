@@ -1,10 +1,4 @@
 import io
-import json
-import os
-import shutil
-import subprocess
-import sys
-import tempfile
 import zipfile
 from functools import lru_cache
 from pathlib import Path
@@ -14,7 +8,6 @@ from docx import Document
 from PyPDF2 import PdfReader
 
 
-DOC_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 MAX_ARCHIVE_ENTRIES = 4_096
 MAX_ARCHIVE_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
 MAX_ARCHIVE_COMPRESSION_RATIO = 200
@@ -44,8 +37,6 @@ def validate_document_signature(filename: str, content: bytes) -> None:
         required_entry = "word/document.xml" if suffix == ".docx" else "xl/workbook.xml"
         if "[Content_Types].xml" not in names or required_entry not in names:
             raise ValueError(f"文件扩展名为 {suffix[1:].upper()}，但文档结构不匹配。")
-    if suffix == ".doc" and not content.startswith(DOC_SIGNATURE):
-        raise ValueError("文件扩展名为 DOC，但内容签名不匹配。")
     if suffix in {".txt", ".md"} and b"\x00" in content:
         raise ValueError("文本文件包含二进制内容。")
 
@@ -60,8 +51,6 @@ def parse_document(filename: str, content: bytes) -> str:
         return _parse_pdf(content)
     if suffix == ".docx":
         return _parse_docx(content)
-    if suffix == ".doc":
-        return _parse_legacy_doc(content)
     if suffix == ".xlsx":
         return _parse_xlsx(content)
     if suffix in {".txt", ".md"}:
@@ -69,7 +58,7 @@ def parse_document(filename: str, content: bytes) -> str:
         if not text:
             raise ValueError("文本文件未解析出内容，请检查编码或文件内容。")
         return text
-    raise ValueError("仅支持 PDF、DOC、DOCX、XLSX、TXT、MD 文件。")
+    raise ValueError("仅支持 PDF、DOCX、XLSX、TXT、MD 文件。")
 
 
 def _parse_pdf(content: bytes) -> str:
@@ -214,102 +203,3 @@ def _parse_xlsx(content: bytes) -> str:
     if not parsed:
         raise ValueError("XLSX 未解析出内容，请检查工作表数据。")
     return parsed
-
-
-def _parse_legacy_doc(content: bytes) -> str:
-    converter = _find_legacy_doc_converter()
-    if converter is None:
-        raise ValueError("当前应用未包含 DOC 转换组件。请联系应用提供方重新打包，或先转换为 DOCX。")
-
-    try:
-        with tempfile.TemporaryDirectory(prefix="bid-doc-") as temp_dir:
-            source = Path(temp_dir) / "document.doc"
-            source.write_bytes(content)
-            run_options = {
-                "capture_output": True,
-                "check": False,
-                "timeout": 30,
-                "cwd": temp_dir,
-                "env": _converter_environment(temp_dir),
-                "start_new_session": True,
-            }
-            if Path(converter).name == "textutil":
-                result = subprocess.run(
-                    [converter, "-convert", "txt", "-stdout", str(source)],
-                    **run_options,
-                )
-                output = result.stdout
-            else:
-                profile_dir = Path(temp_dir) / "profile"
-                profile_dir.mkdir()
-                result = subprocess.run(
-                    [
-                        converter,
-                        "--headless",
-                        "--nologo",
-                        "--nodefault",
-                        "--norestore",
-                        f"-env:UserInstallation={profile_dir.as_uri()}",
-                        "--convert-to",
-                        "txt:Text",
-                        "--outdir",
-                        temp_dir,
-                        str(source),
-                    ],
-                    **run_options,
-                )
-                output_path = Path(temp_dir) / "document.txt"
-                output = output_path.read_bytes() if output_path.exists() else b""
-    except subprocess.TimeoutExpired as exc:
-        raise ValueError("DOC 解析超时，请先转换为 DOCX 后重试。") from exc
-
-    text = output.decode("utf-8", errors="ignore").strip()
-    if result.returncode != 0 or not text:
-        raise ValueError("DOC 未解析出内容，请检查文件是否受保护或先转换为 DOCX。")
-    return text
-
-
-def _find_legacy_doc_converter() -> str | None:
-    bundled = _bundled_legacy_doc_converter()
-    if bundled:
-        return bundled
-    if getattr(sys, "frozen", False):
-        return None
-    for command in ("soffice", "libreoffice", "textutil"):
-        path = shutil.which(command)
-        if path:
-            return path
-    return None
-
-
-def _converter_environment(temp_dir: str) -> dict[str, str]:
-    environment = {
-        "HOME": temp_dir,
-        "PATH": os.defpath,
-        "TMPDIR": temp_dir,
-    }
-    for name in ("LANG", "LC_ALL", "SYSTEMROOT", "WINDIR"):
-        if value := os.getenv(name):
-            environment[name] = value
-    return environment
-
-
-def _agent_resource_dir() -> Path:
-    return Path(sys.executable).resolve().parent
-
-
-def _bundled_legacy_doc_converter() -> str | None:
-    root = _agent_resource_dir() / "doc-converter"
-    manifest = root / "converter.json"
-    try:
-        executable = json.loads(manifest.read_text(encoding="utf-8")).get("executable", "")
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(executable, str) or not executable or Path(executable).is_absolute():
-        return None
-    candidate = (root / executable).resolve()
-    try:
-        candidate.relative_to(root.resolve())
-    except ValueError:
-        return None
-    return str(candidate) if candidate.is_file() else None

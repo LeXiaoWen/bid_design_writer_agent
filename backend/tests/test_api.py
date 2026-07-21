@@ -1,7 +1,6 @@
 import io
 import os
 import sqlite3
-import tempfile
 import zipfile
 from PIL import Image
 from pathlib import Path
@@ -11,9 +10,6 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-os.environ["AI_WORKBENCH_DB_PATH"] = str(Path(tempfile.gettempdir()) / f"ai-workbench-test-{uuid4()}.db")
-os.environ["APP_AUTH_SECRET"] = "test-app-secret"
-os.environ["AI_WORKBENCH_TEST_MODE"] = "1"
 
 from backend.main import app
 from backend.schemas import BidExecutionState, BidWorkflowStatus, ProviderModel, WorkbenchConversationCreate, WorkbenchProjectCreate
@@ -1113,10 +1109,10 @@ def test_bid_workflow_v1_rejects_parse_error_and_missing_key():
     parse_error = client.post(
         "/api/v1/bid-workflows",
         data={"conversation_id": conversation_id, "provider_profile_id": keyed_profile_id},
-        files={"file": ("old.doc", b"abc", "application/msword")},
+        files={"file": ("old.pptx", b"abc", "application/vnd.openxmlformats-officedocument.presentationml.presentation")},
     )
     assert parse_error.status_code == 400
-    assert "签名不匹配" in parse_error.json()["detail"]
+    assert "仅支持" in parse_error.json()["detail"]
 
 
 def test_bid_workflow_upload_rejects_oversized_file(monkeypatch):

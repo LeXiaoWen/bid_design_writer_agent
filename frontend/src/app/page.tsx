@@ -454,7 +454,7 @@ export default function Home() {
     if (!text || isStreaming) return;
     setError(null);
 
-    if (!currentProfileId) {
+    if (!currentProfileId || !currentProfile?.has_key) {
       setConfigOpen(true);
       setError("请先配置模型 API。");
       return;
@@ -538,7 +538,7 @@ export default function Home() {
     if (!file || uploadProgress !== null) return;
     setError(null);
 
-    if (!currentProfileId) {
+    if (!currentProfileId || !currentProfile?.has_key) {
       openConfigPanel();
       setError("请先配置模型 API。");
       return;
@@ -796,7 +796,7 @@ export default function Home() {
 
   async function openModelMenu() {
     setAttachmentMenuOpen(false);
-    if (!currentProfileId) {
+    if (!currentProfile?.has_key) {
       openConfigPanel();
       setError("请先配置模型 API。");
       return;
@@ -917,7 +917,7 @@ export default function Home() {
           onUploadTenderFile={uploadTenderFile}
           uploadProgress={uploadProgress}
           uploadFileName={uploadFileName}
-          isConfigured={Boolean(currentProfile?.model)}
+          isConfigured={Boolean(currentProfile?.model && currentProfile?.has_key)}
           currentProfileModel={currentProfile?.model ?? null}
           onOpenConfig={openConfigPanel}
           webSearchConfig={webSearchConfig}
@@ -950,6 +950,7 @@ export default function Home() {
         onOpenChange={setConfigOpen}
         presets={providerPresets}
         profile={configProfile}
+        hasKey={currentProfile?.has_key ?? false}
         onSaveProfile={saveProfile}
         webSearchConfig={webSearchConfig}
         onSaveWebSearch={saveWebSearchConfig}

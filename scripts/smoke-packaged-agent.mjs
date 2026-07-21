@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { accessSync, constants, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join, relative, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deflateSync } from "node:zlib";
 
@@ -21,22 +21,10 @@ const appPath = resolve(
 );
 const resourcesPath = join(appPath, "Contents", "Resources");
 const agentPath = join(resourcesPath, "agent", "ai-workbench-agent", "ai-workbench-agent");
-const converterRoot = join(resourcesPath, "agent", "ai-workbench-agent", "doc-converter");
-const converterManifest = join(converterRoot, "converter.json");
 
 function requireFile(filePath, executable = false) {
   if (!existsSync(filePath)) throw new Error(`缺少打包资源：${filePath}`);
   if (executable) accessSync(filePath, constants.X_OK);
-}
-
-function bundledConverterPath() {
-  requireFile(converterManifest);
-  const { executable } = JSON.parse(readFileSync(converterManifest, "utf8"));
-  if (typeof executable !== "string" || !executable) throw new Error("DOC 转换器清单无效。");
-  const converterPath = resolve(converterRoot, executable);
-  if (relative(converterRoot, converterPath).startsWith("..")) throw new Error("DOC 转换器路径越出资源目录。");
-  requireFile(converterPath, true);
-  return converterPath;
 }
 
 function runCommand(command, args, options = {}) {
@@ -113,28 +101,17 @@ function writeScannedPng(filePath, text) {
   writeFileSync(filePath, Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), pngChunk("IHDR", header), pngChunk("IDAT", deflateSync(pixels)), pngChunk("IEND", Buffer.alloc(0))]));
 }
 
-function createDocumentFixtures(root, converterPath) {
-  const legacyMarker = "LEGACY DOC TENDER 2026";
+function createDocumentFixtures(root) {
   const ocrMarker = "OCR TENDER 2026";
-  const rtfPath = join(root, "legacy.rtf");
-  const docPath = join(root, "legacy.doc");
   const pngPath = join(root, "scanned.png");
   const pdfPath = join(root, "scanned.pdf");
-  writeFileSync(rtfPath, `{\\rtf1\\ansi\\fs36 ${legacyMarker}}`, "utf8");
-  runCommand(converterPath, ["--headless", "--convert-to", "doc:MS Word 97", "--outdir", root, rtfPath], {
-    env: { ...process.env, HOME: root },
-  });
-  if (!readFileSync(docPath).subarray(0, 8).equals(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]))) {
-    throw new Error("未生成有效的旧版 DOC 样本。");
-  }
-
   writeScannedPng(pngPath, ocrMarker);
   writeFileSync(pdfPath, runCommand("/usr/sbin/cupsfilter", ["-i", "image/png", "-m", "application/pdf", pngPath]));
   const pdf = readFileSync(pdfPath);
   if (!pdf.subarray(0, 5).equals(Buffer.from("%PDF-")) || pdf.includes(Buffer.from(ocrMarker))) {
     throw new Error("未生成纯图像扫描 PDF 样本。");
   }
-  return { docPath, legacyMarker, ocrMarker, pdfPath };
+  return { ocrMarker, pdfPath };
 }
 
 async function requestJson(url, path, options = {}) {
@@ -181,28 +158,22 @@ async function verifyDocumentParsing(url, dataRoot) {
     form.append("file", new Blob([readFileSync(filePath)]), fileName);
     return requestJson(url, "/api/v1/bid-workflows", { method: "POST", headers, body: form });
   };
-  const converterPath = bundledConverterPath();
-  const fixtures = createDocumentFixtures(dataRoot, converterPath);
-  const legacyWorkflow = await upload(fixtures.docPath, "legacy.doc");
+  const fixtures = createDocumentFixtures(dataRoot);
   const scannedWorkflow = await upload(fixtures.pdfPath, "scanned.pdf");
   const readWorkflowText = (id) => {
     const result = runCommand("/usr/bin/sqlite3", ["-json", join(dataRoot, "data", "app.db"), `SELECT file_text FROM bid_workflows WHERE id = '${id.replaceAll("'", "''")}'`]);
     return JSON.parse(result.toString("utf8"))[0]?.file_text || "";
   };
-  if (!readWorkflowText(legacyWorkflow.id).includes(fixtures.legacyMarker)) throw new Error("旧版 DOC 未解析出预期文本。");
   const scannedText = readWorkflowText(scannedWorkflow.id);
   if (!["OCR", "TENDER", "2026"].every((token) => scannedText.includes(token))) {
     throw new Error(`扫描 PDF OCR 未解析出预期文本：${scannedText}`);
   }
-  console.log("真实旧版 DOC 与扫描 PDF OCR 解析通过。");
+  console.log("扫描 PDF OCR 解析通过。");
 }
 
 async function smokeAgent() {
   requireFile(join(resourcesPath, "frontend", "index.html"));
   requireFile(agentPath, true);
-  const converterPath = bundledConverterPath();
-  const converter = spawnSync(converterPath, ["--version"], { encoding: "utf8", timeout: 10_000 });
-  if (converter.status !== 0) throw new Error(`DOC 转换器无法启动：${converter.stderr || converter.stdout}`);
 
   const dataRoot = mkdtempSync(join(tmpdir(), "ai-workbench-packaged-smoke-"));
   const agent = spawn(agentPath, [], {
@@ -249,7 +220,7 @@ async function smokeAgent() {
       throw new Error(`agent 健康检查失败：${JSON.stringify(health)}`);
     }
     await verifyDocumentParsing(`http://127.0.0.1:${port}`, dataRoot);
-    console.log(`打包 agent 冒烟通过：端口 ${port}，DOC 转换器 ${basename(converterPath)}。`);
+    console.log(`打包 agent 冒烟通过：端口 ${port}。`);
   } finally {
     agent.kill("SIGTERM");
     rmSync(dataRoot, { recursive: true, force: true });
