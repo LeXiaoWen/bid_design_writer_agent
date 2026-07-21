@@ -115,7 +115,7 @@ def test_auth_error_keeps_cors_headers_for_app_frontend():
 
 def test_themes_are_private_and_custom_images_are_not_exposed_by_path(tmp_path, monkeypatch):
     monkeypatch.setattr("backend.routers.themes.data_dir", lambda: tmp_path)
-    monkeypatch.setattr("backend.routers.themes.DEFAULT_IMAGES_DIR", tmp_path / "no-images")
+    monkeypatch.setattr("backend.routers.themes._resolve_default_images_dir", lambda: None)
     initial = client.get("/api/v1/themes")
     assert initial.status_code == 200
     assert initial.json()["active_theme_id"] == "system"
@@ -148,7 +148,7 @@ def test_themes_are_private_and_custom_images_are_not_exposed_by_path(tmp_path, 
 
 def test_theme_upload_rejects_mismatched_mime_and_oversized_pixels_without_writing(tmp_path, monkeypatch):
     monkeypatch.setattr("backend.routers.themes.data_dir", lambda: tmp_path)
-    monkeypatch.setattr("backend.routers.themes.DEFAULT_IMAGES_DIR", tmp_path / "no-images")
+    monkeypatch.setattr("backend.routers.themes._resolve_default_images_dir", lambda: None)
     invalid = client.post(
         "/api/v1/themes",
         files={"file": ("blueprint.png", theme_png_bytes(), "image/jpeg")},
@@ -170,7 +170,7 @@ def test_default_images_are_seeded_as_themes_on_first_list(tmp_path, monkeypatch
     images_dir.mkdir()
     (images_dir / "default.png").write_bytes(theme_png_bytes())
     monkeypatch.setattr("backend.routers.themes.data_dir", lambda: tmp_path)
-    monkeypatch.setattr("backend.routers.themes.DEFAULT_IMAGES_DIR", images_dir)
+    monkeypatch.setattr("backend.routers.themes._resolve_default_images_dir", lambda: images_dir)
 
     tenant_client, _user_id = register_tenant_client("default-theme-user")
     response = tenant_client.get("/api/v1/themes")

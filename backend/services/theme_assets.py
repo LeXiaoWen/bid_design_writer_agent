@@ -14,10 +14,10 @@ MAX_THEME_IMAGE_BYTES = 16 * 1024 * 1024
 MAX_THEME_IMAGE_DIMENSION = 16_384
 MAX_THEME_IMAGE_PIXELS = 50_000_000
 ALLOWED_THEME_IMAGES = {
-    ".png": ("PNG", "image/png"),
-    ".jpg": ("JPEG", "image/jpeg"),
-    ".jpeg": ("JPEG", "image/jpeg"),
-    ".webp": ("WEBP", "image/webp"),
+    ".png": ("PNG", {"image/png"}),
+    ".jpg": ("JPEG", {"image/jpeg", "image/jpg"}),
+    ".jpeg": ("JPEG", {"image/jpeg", "image/jpg"}),
+    ".webp": ("WEBP", {"image/webp"}),
 }
 
 
@@ -36,8 +36,8 @@ def validate_theme_image(filename: str, content: bytes, content_type: str | None
         raise ValueError("主题背景仅支持 PNG、JPEG 或 WebP 图片。")
     if not content or len(content) > MAX_THEME_IMAGE_BYTES:
         raise ValueError("主题背景图片不能超过 16MB。")
-    expected_format, expected_media_type = expected
-    if content_type != expected_media_type:
+    expected_format, expected_media_types = expected
+    if content_type and content_type not in expected_media_types:
         raise ValueError("主题背景的文件扩展名与 MIME 类型不一致。")
     try:
         with warnings.catch_warnings():
@@ -56,7 +56,7 @@ def validate_theme_image(filename: str, content: bytes, content_type: str | None
         raise ValueError("主题背景的文件扩展名与实际图片格式不一致。")
     if width > MAX_THEME_IMAGE_DIMENSION or height > MAX_THEME_IMAGE_DIMENSION or width * height > MAX_THEME_IMAGE_PIXELS:
         raise ValueError("主题背景图片的尺寸或像素数量过大。")
-    return ThemeImageInfo(extension=extension, media_type=expected_media_type, width=width, height=height)
+    return ThemeImageInfo(extension=extension, media_type=next(iter(expected_media_types)), width=width, height=height)
 
 
 def user_theme_directory(root: Path, user_id: str) -> Path:

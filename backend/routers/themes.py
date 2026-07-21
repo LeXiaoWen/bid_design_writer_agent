@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
+import os
 import random
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -13,9 +16,38 @@ from ..services.workbench_store import data_dir, workbench_store
 from .dependencies import current_user
 
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 SYSTEM_THEME_ID = "system"
-DEFAULT_IMAGES_DIR = Path(__file__).resolve().parents[2] / "images"
+
+
+def _resolve_default_images_dir() -> Path | None:
+    """Resolve the default images directory across dev and packaged modes."""
+    override = os.getenv("AI_WORKBENCH_IMAGES_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+
+    candidates: list[Path] = []
+
+    # PyInstaller onedir: files land under sys._MEIPASS
+    frozen_dir = getattr(sys, "_MEIPASS", None)
+    if frozen_dir:
+        candidates.append(Path(frozen_dir) / "images")
+
+    # Frozen executable's directory (also works for Electron extraResources)
+    executable = getattr(sys, "executable", None)
+    if executable:
+        candidates.append(Path(executable).parent / "images")
+
+    # Dev/source tree fallback
+    candidates.append(Path(__file__).resolve().parents[2] / "images")
+
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+
+    logger.debug("No default images directory found; candidates: %s", [str(c) for c in candidates])
+    return None
 
 
 def theme_response(theme: UserTheme) -> UserTheme:
@@ -25,26 +57,33 @@ def theme_response(theme: UserTheme) -> UserTheme:
 
 
 def _seed_default_themes(user_id: str) -> tuple[list[UserTheme], bool]:
-    """Seed user themes from project-root images/ when the user has no custom themes.
+    """Seed user themes from the default images directory when the user has no custom themes.
 
     Returns (themes, was_seeded).
     """
     existing = workbench_store.list_user_themes(user_id)
-    if existing or not DEFAULT_IMAGES_DIR.is_dir():
+    if existing:
         return existing, False
 
+    default_dir = _resolve_default_images_dir()
+    if not default_dir:
+        return [], False
+
+    logger.info("Seeding default themes for user %s from %s", user_id, default_dir)
     themes: list[UserTheme] = []
-    for path in sorted(DEFAULT_IMAGES_DIR.iterdir()):
+    for path in sorted(default_dir.iterdir()):
         suffix = path.suffix.lower()
         if suffix not in ALLOWED_THEME_IMAGES:
             continue
         content = path.read_bytes()
         if len(content) > MAX_THEME_IMAGE_BYTES:
+            logger.warning("Skipping default image %s: exceeds size limit", path.name)
             continue
-        _, expected_media_type = ALLOWED_THEME_IMAGES[suffix]
+        _, expected_media_types = ALLOWED_THEME_IMAGES[suffix]
         try:
-            info = validate_theme_image(path.name, content, expected_media_type)
-        except ValueError:
+            info = validate_theme_image(path.name, content, next(iter(expected_media_types)))
+        except ValueError as exc:
+            logger.warning("Skipping default image %s: %s", path.name, exc)
             continue
         theme_id = str(uuid4())
         stored_name = f"{theme_id}{info.extension}"
@@ -64,7 +103,13 @@ def _seed_default_themes(user_id: str) -> tuple[list[UserTheme], bool]:
         except Exception:
             target = user_theme_directory(data_dir(), user_id) / stored_name
             target.unlink(missing_ok=True)
+            logger.exception("Failed to seed default theme from %s", path.name)
             continue
+
+    if themes:
+        logger.info("Seeded %d default theme(s) for user %s", len(themes), user_id)
+    else:
+        logger.warning("No valid default images found in %s", default_dir)
     return themes, bool(themes)
 
 

@@ -49,6 +49,10 @@ a = Analysis(
             str(project_root / "backend" / "bundled_skills"),
             "backend/bundled_skills",
         ),
+        (
+            str(project_root / "images"),
+            "images",
+        ),
     ] + ocr_datas,
     hiddenimports=hiddenimports,
     hookspath=[],
