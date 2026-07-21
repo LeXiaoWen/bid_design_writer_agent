@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
+from PIL import Image
 
 from ..schemas import ThemeActivateRequest, ThemeAppearance, ThemeListResponse, UserTheme
 from ..services.theme_assets import ALLOWED_THEME_IMAGES, MAX_THEME_IMAGE_BYTES, save_theme_image, user_theme_directory, validate_theme_image
@@ -56,6 +57,22 @@ def theme_response(theme: UserTheme) -> UserTheme:
     return theme
 
 
+def _fast_image_info(path: Path) -> tuple[str, str, int, int] | None:
+    """Return (extension, media_type, width, height) for a bundled image without full decode."""
+    extension = path.suffix.lower()
+    if extension not in ALLOWED_THEME_IMAGES:
+        return None
+    expected_format, expected_media_types = ALLOWED_THEME_IMAGES[extension]
+    try:
+        with Image.open(path) as image:
+            if image.format != expected_format:
+                return None
+            width, height = image.size
+    except Exception:
+        return None
+    return extension, next(iter(expected_media_types)), width, height
+
+
 def _seed_default_themes(user_id: str) -> tuple[list[UserTheme], bool]:
     """Seed user themes from the default images directory when the user has no custom themes.
 
@@ -69,34 +86,36 @@ def _seed_default_themes(user_id: str) -> tuple[list[UserTheme], bool]:
     if not default_dir:
         return [], False
 
+    candidate_paths = [
+        path for path in default_dir.iterdir()
+        if path.suffix.lower() in ALLOWED_THEME_IMAGES and path.stat().st_size <= MAX_THEME_IMAGE_BYTES
+    ]
+    candidate_paths.sort()
+    if not candidate_paths:
+        logger.warning("No valid default images found in %s", default_dir)
+        return [], False
+
     logger.info("Seeding default themes for user %s from %s", user_id, default_dir)
     themes: list[UserTheme] = []
-    for path in sorted(default_dir.iterdir()):
-        suffix = path.suffix.lower()
-        if suffix not in ALLOWED_THEME_IMAGES:
+    for path in candidate_paths:
+        info = _fast_image_info(path)
+        if not info:
+            logger.warning("Skipping default image %s: unreadable or wrong format", path.name)
             continue
-        content = path.read_bytes()
-        if len(content) > MAX_THEME_IMAGE_BYTES:
-            logger.warning("Skipping default image %s: exceeds size limit", path.name)
-            continue
-        _, expected_media_types = ALLOWED_THEME_IMAGES[suffix]
-        try:
-            info = validate_theme_image(path.name, content, next(iter(expected_media_types)))
-        except ValueError as exc:
-            logger.warning("Skipping default image %s: %s", path.name, exc)
-            continue
+        extension, media_type, width, height = info
         theme_id = str(uuid4())
-        stored_name = f"{theme_id}{info.extension}"
+        stored_name = f"{theme_id}{extension}"
         try:
+            content = path.read_bytes()
             image_path = save_theme_image(data_dir(), user_id, stored_name, content)
             theme = workbench_store.create_user_theme(
                 user_id,
                 theme_id=theme_id,
                 name=path.stem or "默认背景",
                 image_path=str(image_path.relative_to(data_dir())),
-                media_type=info.media_type,
-                width=info.width,
-                height=info.height,
+                media_type=media_type,
+                width=width,
+                height=height,
                 appearance=ThemeAppearance.AUTO,
             )
             themes.append(theme)
@@ -108,8 +127,6 @@ def _seed_default_themes(user_id: str) -> tuple[list[UserTheme], bool]:
 
     if themes:
         logger.info("Seeded %d default theme(s) for user %s", len(themes), user_id)
-    else:
-        logger.warning("No valid default images found in %s", default_dir)
     return themes, bool(themes)
 
 

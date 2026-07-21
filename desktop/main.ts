@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from "electron";
+import { app, BrowserWindow, Menu, dialog, ipcMain, net, protocol, shell } from "electron";
 import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
@@ -295,6 +295,10 @@ async function createWindow(): Promise<void> {
       webviewTag: false,
     },
   });
+
+  // 移除默认的 File/Edit/View 菜单栏，使界面更统一
+  mainWindow.setMenu(null);
+  Menu.setApplicationMenu(null);
 
   mainWindow.on("closed", () => {
     mainWindow = null;
