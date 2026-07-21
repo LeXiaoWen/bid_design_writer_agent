@@ -115,6 +115,7 @@ def test_auth_error_keeps_cors_headers_for_app_frontend():
 
 def test_themes_are_private_and_custom_images_are_not_exposed_by_path(tmp_path, monkeypatch):
     monkeypatch.setattr("backend.routers.themes.data_dir", lambda: tmp_path)
+    monkeypatch.setattr("backend.routers.themes.DEFAULT_IMAGES_DIR", tmp_path / "no-images")
     initial = client.get("/api/v1/themes")
     assert initial.status_code == 200
     assert initial.json()["active_theme_id"] == "system"
@@ -147,6 +148,7 @@ def test_themes_are_private_and_custom_images_are_not_exposed_by_path(tmp_path, 
 
 def test_theme_upload_rejects_mismatched_mime_and_oversized_pixels_without_writing(tmp_path, monkeypatch):
     monkeypatch.setattr("backend.routers.themes.data_dir", lambda: tmp_path)
+    monkeypatch.setattr("backend.routers.themes.DEFAULT_IMAGES_DIR", tmp_path / "no-images")
     invalid = client.post(
         "/api/v1/themes",
         files={"file": ("blueprint.png", theme_png_bytes(), "image/jpeg")},
@@ -161,6 +163,31 @@ def test_theme_upload_rejects_mismatched_mime_and_oversized_pixels_without_writi
     )
     assert too_large.status_code == 400
     assert not (tmp_path / "themes").exists()
+
+
+def test_default_images_are_seeded_as_themes_on_first_list(tmp_path, monkeypatch):
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    (images_dir / "default.png").write_bytes(theme_png_bytes())
+    monkeypatch.setattr("backend.routers.themes.data_dir", lambda: tmp_path)
+    monkeypatch.setattr("backend.routers.themes.DEFAULT_IMAGES_DIR", images_dir)
+
+    tenant_client, _user_id = register_tenant_client("default-theme-user")
+    response = tenant_client.get("/api/v1/themes")
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["themes"]) == 2
+    assert payload["themes"][0] == {"id": "system", "name": "系统工作台", "source": "system", "appearance": "auto", "image_url": None, "width": None, "height": None, "created_at": None, "updated_at": None}
+    seeded = payload["themes"][1]
+    assert seeded["name"] == "default"
+    assert seeded["source"] == "custom"
+    assert seeded["image_url"] == f"/api/v1/themes/{seeded['id']}/image"
+    assert payload["active_theme_id"] != "system"
+    assert payload["active_theme_id"] == seeded["id"]
+
+    image = tenant_client.get(seeded["image_url"])
+    assert image.status_code == 200
+    assert image.headers["content-type"] == "image/png"
 
 
 def test_legacy_project_routes_are_removed():

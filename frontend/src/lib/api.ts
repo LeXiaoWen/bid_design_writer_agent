@@ -174,14 +174,6 @@ export function changePassword(input: { current_password: string; new_password: 
   });
 }
 
-export function restoreCredentials(input: { password: string }): Promise<{ ok: boolean; restored: number }> {
-  return request<{ ok: boolean; restored: number }>("/api/v1/auth/restore-credentials", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
-}
-
 export function listProjects(): Promise<WorkbenchProject[]> {
   return request<WorkbenchProject[]>("/api/v1/projects");
 }
@@ -222,6 +214,21 @@ export function listMessages(conversationId: string): Promise<WorkbenchMessage[]
 
 export function deleteConversation(conversationId: string): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>(`/api/v1/conversations/${conversationId}`, { method: "DELETE" });
+}
+
+export function updateConversation(
+  conversationId: string,
+  input: {
+    title?: string;
+    provider_profile_id?: string;
+    model?: string;
+  },
+): Promise<WorkbenchConversation> {
+  return request<WorkbenchConversation>(`/api/v1/conversations/${conversationId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
 }
 
 export function listProviderProfiles(): Promise<ProviderProfile[]> {

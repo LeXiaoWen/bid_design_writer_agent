@@ -7,10 +7,8 @@ from ..schemas import (
     AuthStatus,
     AuthUser,
     ChangePasswordRequest,
-    RestoreCredentialsRequest,
 )
 from ..services.auth import AuthRateLimitError, change_password, login_user, logout_token, register_user, user_from_token
-from ..services.workbench_store import workbench_store
 from .dependencies import bearer_token, current_user
 
 router = APIRouter()
@@ -58,12 +56,3 @@ def change_auth_password(request: Request, payload: ChangePasswordRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True}
-
-
-@router.post("/api/v1/auth/restore-credentials")
-def restore_auth_credentials(request: Request, payload: RestoreCredentialsRequest):
-    try:
-        restored = workbench_store.restore_latest_legacy_secrets(current_user(request).id, payload.password)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"ok": True, "restored": restored}

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
@@ -409,11 +408,7 @@ class WorkbenchStore:
                 self.set_user_setting(user_id, key, value)
 
     def migrate_legacy_secrets_on_login(self, user_id: str, password: str) -> None:
-        """Move legacy plaintext data into the password-encrypted local vault.
-
-        A password-encrypted recovery blob is written before any destructive operation so
-        a user can import it later if the migration is interrupted.
-        """
+        """Move legacy plaintext data into the password-encrypted local vault."""
         profiles = self._execute(
             "SELECT id, credential_key, api_key FROM provider_profiles WHERE owner_user_id = ? AND api_key IS NOT NULL AND api_key != ''",
             (user_id,),
@@ -426,7 +421,6 @@ class WorkbenchStore:
         if not secrets_to_migrate:
             return
 
-        self._write_recovery_backup(user_id, password, secrets_to_migrate)
         vault_key = self._credential_vault_key(user_id)
         credentials = [(f"provider:{user_id}:{row['id']}", row["api_key"]) for row in profiles]
         if tavily_key:
@@ -453,87 +447,6 @@ class WorkbenchStore:
             self._execute("UPDATE provider_profiles SET api_key = NULL WHERE owner_user_id = ?", (user_id,))
             self.set_user_setting(user_id, "web_search.api_key", "")
             self.set_user_setting(user_id, "web_search.has_key", "1" if tavily_key else "0")
-        self._remove_recovery_backups(user_id)
-
-    def _write_recovery_backup(self, user_id: str, password: str, values: dict[str, str]) -> Path:
-        salt = os.urandom(16)
-        nonce = os.urandom(12)
-        kdf = Scrypt(salt=salt, length=32, n=2**14, r=8, p=1)
-        key = kdf.derive(password.encode("utf-8"))
-        encrypted = AESGCM(key).encrypt(nonce, json.dumps(values, ensure_ascii=False).encode("utf-8"), user_id.encode("utf-8"))
-        recovery_dir = data_dir() / "credential-recovery"
-        recovery_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        target = recovery_dir / f"{user_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}.json.enc"
-        payload = {"version": 1, "user_id": user_id, "salt": urlsafe_b64encode(salt).decode(), "nonce": urlsafe_b64encode(nonce).decode(), "ciphertext": urlsafe_b64encode(encrypted).decode()}
-        target.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        target.chmod(0o600)
-        return target
-
-    def _recovery_backup_paths(self, user_id: str) -> list[Path]:
-        recovery_dir = data_dir() / "credential-recovery"
-        return sorted(recovery_dir.glob(f"{user_id}-*.json.enc"), reverse=True) if recovery_dir.exists() else []
-
-    def _remove_recovery_backups(self, user_id: str) -> None:
-        for path in self._recovery_backup_paths(user_id):
-            path.unlink(missing_ok=True)
-
-    def restore_latest_legacy_secrets(self, user_id: str, password: str) -> int:
-        candidates = self._recovery_backup_paths(user_id)
-        if not candidates:
-            raise ValueError("未找到可恢复的旧密钥备份。")
-        payload = json.loads(candidates[0].read_text(encoding="utf-8"))
-        if payload.get("user_id") != user_id:
-            raise ValueError("旧密钥备份与当前账号不匹配。")
-        salt = urlsafe_b64decode(payload["salt"])
-        nonce = urlsafe_b64decode(payload["nonce"])
-        ciphertext = urlsafe_b64decode(payload["ciphertext"])
-        try:
-            key = Scrypt(salt=salt, length=32, n=2**14, r=8, p=1).derive(password.encode("utf-8"))
-            values = json.loads(AESGCM(key).decrypt(nonce, ciphertext, user_id.encode("utf-8")))
-        except Exception as exc:
-            raise ValueError("恢复密码错误或备份文件已损坏。") from exc
-        vault_key = self._credential_vault_key(user_id)
-        credentials: list[tuple[str, str]] = []
-        profile_ids: list[str] = []
-        for name, secret in values.items():
-            if name == "tavily":
-                credentials.append((self._tavily_credential_key(user_id), secret))
-                continue
-            if not name.startswith("provider:"):
-                continue
-            profile_id = name.removeprefix("provider:")
-            row = self._execute("SELECT id FROM provider_profiles WHERE id = ? AND owner_user_id = ?", (profile_id, user_id)).fetchone()
-            if not row:
-                continue
-            credentials.append((f"provider:{user_id}:{profile_id}", secret))
-            profile_ids.append(profile_id)
-        now = utc_now()
-        encrypted_credentials = []
-        for credential_key, secret in credentials:
-            credential_nonce = os.urandom(12)
-            credential_ciphertext = AESGCM(vault_key).encrypt(
-                credential_nonce,
-                secret.encode("utf-8"),
-                self._credential_aad(user_id, credential_key),
-            )
-            encrypted_credentials.append((credential_key, credential_nonce, credential_ciphertext))
-        with self._lock, self._connection:
-            for credential_key, credential_nonce, credential_ciphertext in encrypted_credentials:
-                self._execute(
-                    """
-                    INSERT INTO encrypted_credentials (user_id, credential_key, nonce, ciphertext, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(user_id, credential_key) DO UPDATE SET nonce = excluded.nonce, ciphertext = excluded.ciphertext, updated_at = excluded.updated_at
-                    """,
-                    (user_id, credential_key, credential_nonce, credential_ciphertext, now, now),
-                )
-            for profile_id in profile_ids:
-                credential_key = f"provider:{user_id}:{profile_id}"
-                self._execute("UPDATE provider_profiles SET credential_key = ?, has_key = 1, api_key = NULL WHERE id = ?", (credential_key, profile_id))
-            if any(name == "tavily" for name in values):
-                self.set_user_setting(user_id, "web_search.has_key", "1")
-        self._remove_recovery_backups(user_id)
-        return len(credentials)
 
     def unlock_credential_vault(self, user_id: str, password: str) -> None:
         now = utc_now()
@@ -595,7 +508,6 @@ class WorkbenchStore:
         new_password: str,
         new_password_hash: str,
     ) -> None:
-        self._remove_recovery_backups(user_id)
         old_key = self._credential_vault_key(user_id)
         row = self._execute("SELECT salt FROM credential_vaults WHERE user_id = ?", (user_id,)).fetchone()
         if not row:

@@ -196,10 +196,6 @@ class ChangePasswordRequest(BaseModel):
     new_password: str = Field(min_length=12)
 
 
-class RestoreCredentialsRequest(BaseModel):
-    password: str = Field(min_length=1)
-
-
 class ThemeAppearance(str, Enum):
     AUTO = "auto"
     LIGHT = "light"

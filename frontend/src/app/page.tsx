@@ -22,7 +22,6 @@ import {
   generateBidWorkflow,
   getBidWorkflow,
   listBidWorkflows,
-  restoreCredentials,
   searchWorkbench,
   streamBidWorkflow,
 } from "@/lib/api";
@@ -137,6 +136,7 @@ export default function Home() {
     deleteProject: deleteProjectMutation,
     createConversation: createConversationMutation,
     deleteConversation: deleteConversationMutation,
+    updateConversation,
   } = useWorkbenchData({ enabled: authMode === "ready", projectId: currentProjectId, conversationId: currentConversationId });
   const {
     profiles,
@@ -466,6 +466,15 @@ export default function Home() {
     }
 
     const conversationId = await ensureConversation(text);
+    if (currentConversation?.title === "新对话") {
+      try {
+        const title = text.slice(0, 32) || "新对话";
+        await updateConversation({ id: conversationId, title });
+        await refreshConversations(currentProjectId);
+      } catch {
+        // 标题更新为尽力而为，失败不应阻塞聊天流
+      }
+    }
     setInput("");
     updateMessages(conversationId, (current) => [...current, localMessage("user", text, "completed")]);
     try {
@@ -764,22 +773,6 @@ export default function Home() {
     }
   }
 
-  async function restoreLegacyCredentials() {
-    const password = passwordChangeForm.getValues("currentPassword");
-    if (!password) {
-      passwordChangeForm.setError("currentPassword", { message: "请输入当前密码后再恢复。" });
-      return;
-    }
-    passwordChangeForm.clearErrors("root");
-    try {
-      const { restored } = await restoreCredentials({ password });
-      await refreshConfiguration();
-      toast.success(restored ? `已恢复 ${restored} 项旧密钥。` : "未找到可恢复的旧密钥。");
-    } catch (caught) {
-      passwordChangeForm.setError("root", { message: caught instanceof Error ? caught.message : String(caught) });
-    }
-  }
-
   async function logoutUser() {
     await logoutAuthSession();
     setUserPanelOpen(false);
@@ -975,56 +968,66 @@ export default function Home() {
                 onUpload={uploadAppTheme}
                 onDelete={removeAppTheme}
               />
-              <div className="user-detail">
-                <span>当前账号</span>
-                <strong>{authUser?.username ?? "未登录"}</strong>
+              <div className="user-section">
+                <div className="user-section-title">账号信息</div>
+                <div className="user-detail">
+                  <span>当前账号</span>
+                  <strong>{authUser?.username ?? "未登录"}</strong>
+                </div>
+                <div className="user-detail">
+                  <span>数据范围</span>
+                  <strong>当前账号独立数据</strong>
+                </div>
               </div>
-              <div className="user-detail">
-                <span>数据范围</span>
-                <strong>当前账号独立数据</strong>
+              <div className="user-section">
+                <div className="user-section-title">头像设置</div>
+                <div className="avatar-settings">
+                  <label>
+                    用户头像
+                    <input value={userChatAvatar} onChange={(event) => updateChatAvatar("user", event.target.value)} placeholder="文字、emoji 或图片 URL" />
+                  </label>
+                  <label>
+                    LLM 头像
+                    <input value={assistantChatAvatar} onChange={(event) => updateChatAvatar("assistant", event.target.value)} placeholder="文字、emoji 或图片 URL" />
+                  </label>
+                </div>
               </div>
-              <div className="avatar-settings">
-                <label>
-                  用户头像
-                  <input value={userChatAvatar} onChange={(event) => updateChatAvatar("user", event.target.value)} placeholder="文字、emoji 或图片 URL" />
-                </label>
-                <label>
-                  LLM 头像
-                  <input value={assistantChatAvatar} onChange={(event) => updateChatAvatar("assistant", event.target.value)} placeholder="文字、emoji 或图片 URL" />
-                </label>
+              <div className="user-section">
+                <div className="user-section-title">修改密码</div>
+                <form className="user-login-form" onSubmit={passwordChangeForm.handleSubmit(changeCurrentPassword)}>
+                  <label>
+                    当前密码
+                    <input
+                      {...passwordChangeForm.register("currentPassword")}
+                      type="password"
+                      autoComplete="current-password"
+                    />
+                    {passwordChangeForm.formState.errors.currentPassword && <small className="auth-field-error">{passwordChangeForm.formState.errors.currentPassword.message}</small>}
+                  </label>
+                  <label>
+                    新密码
+                    <input
+                      {...passwordChangeForm.register("newPassword")}
+                      type="password"
+                      autoComplete="new-password"
+                    />
+                    {passwordChangeForm.formState.errors.newPassword && <small className="auth-field-error">{passwordChangeForm.formState.errors.newPassword.message}</small>}
+                  </label>
+                  <label>
+                    确认新密码
+                    <input
+                      {...passwordChangeForm.register("confirmPassword")}
+                      type="password"
+                      autoComplete="new-password"
+                    />
+                    {passwordChangeForm.formState.errors.confirmPassword && <small className="auth-field-error">{passwordChangeForm.formState.errors.confirmPassword.message}</small>}
+                  </label>
+                  {passwordChangeForm.formState.errors.root && <div className="auth-field-error">{passwordChangeForm.formState.errors.root.message}</div>}
+                  <div className="form-actions">
+                    <button type="submit" disabled={passwordChangeForm.formState.isSubmitting}>{passwordChangeForm.formState.isSubmitting ? "修改中" : "修改密码"}</button>
+                  </div>
+                </form>
               </div>
-              <form className="user-login-form" onSubmit={passwordChangeForm.handleSubmit(changeCurrentPassword)}>
-                <label>
-                  当前密码
-                  <input
-                    {...passwordChangeForm.register("currentPassword")}
-                    type="password"
-                    autoComplete="current-password"
-                  />
-                  {passwordChangeForm.formState.errors.currentPassword && <small className="auth-field-error">{passwordChangeForm.formState.errors.currentPassword.message}</small>}
-                </label>
-                <label>
-                  新密码
-                  <input
-                    {...passwordChangeForm.register("newPassword")}
-                    type="password"
-                    autoComplete="new-password"
-                  />
-                  {passwordChangeForm.formState.errors.newPassword && <small className="auth-field-error">{passwordChangeForm.formState.errors.newPassword.message}</small>}
-                </label>
-                <label>
-                  确认新密码
-                  <input
-                    {...passwordChangeForm.register("confirmPassword")}
-                    type="password"
-                    autoComplete="new-password"
-                  />
-                  {passwordChangeForm.formState.errors.confirmPassword && <small className="auth-field-error">{passwordChangeForm.formState.errors.confirmPassword.message}</small>}
-                </label>
-                {passwordChangeForm.formState.errors.root && <div className="auth-field-error">{passwordChangeForm.formState.errors.root.message}</div>}
-                <button type="submit" disabled={passwordChangeForm.formState.isSubmitting}>{passwordChangeForm.formState.isSubmitting ? "修改中" : "修改密码"}</button>
-                <button type="button" className="user-secondary-action" onClick={restoreLegacyCredentials} disabled={passwordChangeForm.formState.isSubmitting}>恢复旧密钥备份</button>
-              </form>
             </div>
             <div className="user-panel-actions">
               <button type="button" className="user-secondary-action" onClick={logoutUser}>

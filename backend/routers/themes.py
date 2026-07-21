@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from pathlib import Path
 from uuid import uuid4
 
@@ -7,13 +8,14 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
 from ..schemas import ThemeActivateRequest, ThemeAppearance, ThemeListResponse, UserTheme
-from ..services.theme_assets import MAX_THEME_IMAGE_BYTES, save_theme_image, validate_theme_image
+from ..services.theme_assets import ALLOWED_THEME_IMAGES, MAX_THEME_IMAGE_BYTES, save_theme_image, user_theme_directory, validate_theme_image
 from ..services.workbench_store import data_dir, workbench_store
 from .dependencies import current_user
 
 
 router = APIRouter()
 SYSTEM_THEME_ID = "system"
+DEFAULT_IMAGES_DIR = Path(__file__).resolve().parents[2] / "images"
 
 
 def theme_response(theme: UserTheme) -> UserTheme:
@@ -22,14 +24,64 @@ def theme_response(theme: UserTheme) -> UserTheme:
     return theme
 
 
+def _seed_default_themes(user_id: str) -> tuple[list[UserTheme], bool]:
+    """Seed user themes from project-root images/ when the user has no custom themes.
+
+    Returns (themes, was_seeded).
+    """
+    existing = workbench_store.list_user_themes(user_id)
+    if existing or not DEFAULT_IMAGES_DIR.is_dir():
+        return existing, False
+
+    themes: list[UserTheme] = []
+    for path in sorted(DEFAULT_IMAGES_DIR.iterdir()):
+        suffix = path.suffix.lower()
+        if suffix not in ALLOWED_THEME_IMAGES:
+            continue
+        content = path.read_bytes()
+        if len(content) > MAX_THEME_IMAGE_BYTES:
+            continue
+        _, expected_media_type = ALLOWED_THEME_IMAGES[suffix]
+        try:
+            info = validate_theme_image(path.name, content, expected_media_type)
+        except ValueError:
+            continue
+        theme_id = str(uuid4())
+        stored_name = f"{theme_id}{info.extension}"
+        try:
+            image_path = save_theme_image(data_dir(), user_id, stored_name, content)
+            theme = workbench_store.create_user_theme(
+                user_id,
+                theme_id=theme_id,
+                name=path.stem or "默认背景",
+                image_path=str(image_path.relative_to(data_dir())),
+                media_type=info.media_type,
+                width=info.width,
+                height=info.height,
+                appearance=ThemeAppearance.AUTO,
+            )
+            themes.append(theme)
+        except Exception:
+            target = user_theme_directory(data_dir(), user_id) / stored_name
+            target.unlink(missing_ok=True)
+            continue
+    return themes, bool(themes)
+
+
 @router.get("/api/v1/themes", response_model=ThemeListResponse)
 def list_themes(request: Request):
     user_id = current_user(request).id
+    user_themes, was_seeded = _seed_default_themes(user_id)
     themes = [UserTheme(id=SYSTEM_THEME_ID, name="系统工作台", source="system")]
-    themes.extend(theme_response(theme) for theme in workbench_store.list_user_themes(user_id))
+    themes.extend(theme_response(theme) for theme in user_themes)
+
     active_theme_id = workbench_store.get_active_theme_id(user_id)
-    if active_theme_id != SYSTEM_THEME_ID and not any(theme.id == active_theme_id for theme in themes):
+    if was_seeded and user_themes:
+        active_theme_id = random.choice(user_themes).id
+        workbench_store.set_active_theme_id(user_id, active_theme_id)
+    elif active_theme_id != SYSTEM_THEME_ID and not any(theme.id == active_theme_id for theme in themes):
         active_theme_id = SYSTEM_THEME_ID
+
     return ThemeListResponse(active_theme_id=active_theme_id, themes=themes)
 
 

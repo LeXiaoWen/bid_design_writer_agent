@@ -11,6 +11,7 @@ import {
   listConversations,
   listMessages,
   listProjects,
+  updateConversation,
 } from "@/lib/api";
 import type { WorkbenchMessage } from "@/lib/types";
 
@@ -80,6 +81,11 @@ export function useWorkbenchData({ enabled, projectId, conversationId }: { enabl
     mutationFn: deleteConversation,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["workbench", "conversations"] }),
   });
+  const updateConversationMutation = useMutation({
+    mutationFn: ({ id, ...input }: { id: string } & Parameters<typeof updateConversation>[1]) =>
+      updateConversation(id, input),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["workbench", "conversations"] }),
+  });
 
   return {
     projects: projectsQuery.data ?? [],
@@ -95,5 +101,6 @@ export function useWorkbenchData({ enabled, projectId, conversationId }: { enabl
     deleteProject: deleteProjectMutation.mutateAsync,
     createConversation: createConversationMutation.mutateAsync,
     deleteConversation: deleteConversationMutation.mutateAsync,
+    updateConversation: updateConversationMutation.mutateAsync,
   };
 }
